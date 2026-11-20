@@ -1,0 +1,15 @@
+# Bench mapping in sensor coordinates. Do not use this as a body mounting transform.
+/**:
+  ros__parameters:
+    odometryFrame: lio_odom
+    mapFrame: lio_odom
+    baselinkFrame: livox_frame
+    odomTopic: lio_sam/imu_odom
+    # Livox Mid-360S User Manual, IMU Data: position of the internal IMU
+    # expressed in the LiDAR coordinates; axes parallel. Upstream applies
+    # world_T_imu = world_T_lidar * lidar_T_imu.
+    extrinsicTrans: [0.011, 0.02329, -0.04412]
+    extrinsicRot: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    extrinsicRPY: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    numberOfCores: 2
+    savePCD: false

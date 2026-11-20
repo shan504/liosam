@@ -1,0 +1,85 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -28,7 +28,7 @@
+ find_package(OpenCV REQUIRED)
+ find_package(PCL REQUIRED)
+ find_package(GTSAM REQUIRED)
+-find_package(Eigen REQUIRED)
++find_package(Eigen3 REQUIRED)
+ find_package(OpenMP REQUIRED)
+ 
+ include_directories(
+@@ -41,25 +41,26 @@
+ 
+ add_executable(${PROJECT_NAME}_featureExtraction src/featureExtraction.cpp)
+ ament_target_dependencies(${PROJECT_NAME}_featureExtraction rclcpp rclpy std_msgs sensor_msgs geometry_msgs nav_msgs pcl_conversions pcl_msgs visualization_msgs tf2 tf2_ros tf2_eigen tf2_sensor_msgs tf2_geometry_msgs OpenCV PCL)
+-rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+-target_link_libraries(${PROJECT_NAME}_featureExtraction "${cpp_typesupport_target}") 
+ 
+ add_executable(${PROJECT_NAME}_imageProjection src/imageProjection.cpp)
+ ament_target_dependencies(${PROJECT_NAME}_imageProjection rclcpp rclpy std_msgs sensor_msgs geometry_msgs nav_msgs pcl_conversions pcl_msgs visualization_msgs tf2 tf2_ros tf2_eigen tf2_sensor_msgs tf2_geometry_msgs OpenCV PCL)
+-target_link_libraries(${PROJECT_NAME}_imageProjection "${cpp_typesupport_target}") 
+ 
+ add_executable(${PROJECT_NAME}_imuPreintegration src/imuPreintegration.cpp)
+-ament_target_dependencies(${PROJECT_NAME}_imuPreintegration rclcpp rclpy std_msgs sensor_msgs geometry_msgs nav_msgs pcl_conversions pcl_msgs visualization_msgs tf2 tf2_ros tf2_eigen tf2_sensor_msgs tf2_geometry_msgs OpenCV PCL GTSAM Eigen)
+-target_link_libraries(${PROJECT_NAME}_imuPreintegration gtsam "${cpp_typesupport_target}")
++ament_target_dependencies(${PROJECT_NAME}_imuPreintegration rclcpp rclpy std_msgs sensor_msgs geometry_msgs nav_msgs pcl_conversions pcl_msgs visualization_msgs tf2 tf2_ros tf2_eigen tf2_sensor_msgs tf2_geometry_msgs OpenCV PCL GTSAM)
++target_link_libraries(${PROJECT_NAME}_imuPreintegration gtsam Eigen3::Eigen)
+ 
+ add_executable(${PROJECT_NAME}_mapOptimization src/mapOptmization.cpp)
+ ament_target_dependencies(${PROJECT_NAME}_mapOptimization rclcpp rclpy std_msgs sensor_msgs geometry_msgs nav_msgs pcl_conversions pcl_msgs visualization_msgs tf2 tf2_ros tf2_eigen tf2_sensor_msgs tf2_geometry_msgs OpenCV PCL GTSAM)
+ if (OpenMP_CXX_FOUND)
+-  target_link_libraries(${PROJECT_NAME}_mapOptimization gtsam "${cpp_typesupport_target}" OpenMP::OpenMP_CXX)
++  target_link_libraries(${PROJECT_NAME}_mapOptimization gtsam Eigen3::Eigen OpenMP::OpenMP_CXX)
+ else()
+-  target_link_libraries(${PROJECT_NAME}_mapOptimization gtsam "${cpp_typesupport_target}")
++  target_link_libraries(${PROJECT_NAME}_mapOptimization gtsam Eigen3::Eigen)
+ endif()
+ 
++
++foreach(node featureExtraction imageProjection imuPreintegration mapOptimization)
++  rosidl_target_interfaces(${PROJECT_NAME}_${node} ${PROJECT_NAME} "rosidl_typesupport_cpp")
++endforeach()
+ 
+ install(
+   DIRECTORY launch
+--- a/include/lio_sam/utility.hpp
++++ b/include/lio_sam/utility.hpp
+@@ -37,8 +37,8 @@
+ #include <tf2/LinearMath/Quaternion.h>
+ #include <tf2_ros/transform_listener.h>
+ #include <tf2_ros/transform_broadcaster.h>
+-#include <tf2_eigen/tf2_eigen.hpp>
+-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
++#include <tf2_eigen/tf2_eigen.h>
++#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+ 
+ #include <vector>
+ #include <cmath>
+--- a/src/imuPreintegration.cpp
++++ b/src/imuPreintegration.cpp
+@@ -14,7 +14,6 @@
+ #include <gtsam/inference/Symbol.h>
+ 
+ #include <gtsam/nonlinear/ISAM2.h>
+-#include <gtsam_unstable/nonlinear/IncrementalFixedLagSmoother.h>
+ 
+ using gtsam::symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
+ using gtsam::symbol_shorthand::V; // Vel   (xdot,ydot,zdot)
+@@ -108,6 +107,7 @@
+             else
+                 break;
+         }
++        if (imuOdomQueue.empty()) return;
+         Eigen::Isometry3d imuOdomAffineFront = odom2affine(imuOdomQueue.front());
+         Eigen::Isometry3d imuOdomAffineBack = odom2affine(imuOdomQueue.back());
+         Eigen::Isometry3d imuOdomAffineIncre = imuOdomAffineFront.inverse() * imuOdomAffineBack;
+@@ -142,6 +142,8 @@
+         }
+         geometry_msgs::msg::TransformStamped ts;
+         tf2::convert(tCur, ts);
++        ts.header.frame_id = odometryFrame;
++        ts.header.stamp = odomMsg->header.stamp;
+         ts.child_frame_id = baselinkFrame;
+         tfBroadcaster->sendTransform(ts);
+ 
