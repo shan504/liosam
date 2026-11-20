@@ -9,5 +9,7 @@
   <depend>livox_ros_driver2</depend>
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>imu_filter_madgwick</exec_depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>

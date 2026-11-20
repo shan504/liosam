@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Inspect Livox scan fields and stationary IMU values before configuring LIO-SAM."""
+import argparse
 from collections import Counter
 from math import sqrt
 from statistics import median
@@ -8,10 +9,13 @@ import time
 import rclpy
 from livox_ros_driver2.msg import CustomMsg
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import Imu
+from sensor_msgs.msg import Imu, PointCloud2, PointField
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--adapted", action="store_true", help="Inspect both LIO-SAM inputs")
+    args = parser.parse_args()
     rclpy.init()
     node = rclpy.create_node("check_livox_inputs")
     got_cloud = False
@@ -29,6 +33,17 @@ def main():
         print("offset_time range (ns):", min(offsets), max(offsets))
         got_cloud = True
 
+    def adapted_cloud(msg):
+        nonlocal got_cloud
+        if got_cloud or msg.width * msg.height == 0:
+            return
+        fields = {f.name: f.datatype for f in msg.fields}
+        expected = {name: PointField.FLOAT32 for name in ("x", "y", "z", "intensity", "time")}
+        expected["ring"] = PointField.UINT16
+        got_cloud = all(fields.get(name) == dtype for name, dtype in expected.items())
+        print("Adapted cloud frame:", msg.header.frame_id, "points:", msg.width * msg.height)
+        print("Point fields:", fields, "LIO-SAM schema OK:", got_cloud)
+
     def imu(msg):
         if len(accel_norms) >= imu_target:
             return
@@ -40,8 +55,14 @@ def main():
         a = msg.linear_acceleration
         accel_norms.append(sqrt(a.x*a.x + a.y*a.y + a.z*a.z))
 
-    cloud_sub = node.create_subscription(CustomMsg, "/livox/lidar", cloud, qos_profile_sensor_data)
-    node.create_subscription(Imu, "/livox/imu", imu, qos_profile_sensor_data)
+    if args.adapted:
+        cloud_sub = node.create_subscription(PointCloud2, "/mid360s/points", adapted_cloud,
+                                             qos_profile_sensor_data)
+        imu_topic = "/mid360s/imu"
+    else:
+        cloud_sub = node.create_subscription(CustomMsg, "/livox/lidar", cloud, qos_profile_sensor_data)
+        imu_topic = "/livox/imu"
+    node.create_subscription(Imu, imu_topic, imu, qos_profile_sensor_data)
     try:
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline and (not got_cloud or len(accel_norms) < imu_target):

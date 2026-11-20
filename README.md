@@ -27,3 +27,24 @@ Defaults: input /livox/lidar, output /mid360s/points. Use ROS remapping to chang
 ## Upstream integration
 
 From the repository directory, run `git submodule update --init upstream/LIO-SAM` to acquire the pinned ROS 2 code. For the Livox projection path, select sensor=livox, pointCloudTopic=/mid360s/points and size the projection from observed scan lines and their point counts. Provide an IMU stream with verified acceleration units, valid orientation and aligned timestamps. Validate LiDAR-to-IMU extrinsics independently of any camera calibration. Record both original topics for offline replay. When integrating with another robot description or localization stack, configure a single TF publisher per edge; the upstream example launch includes a sample robot description and a static map-to-odom transform.
+
+## Validate both adapted inputs
+
+Install the Foxy package `ros-foxy-imu-filter-madgwick`, rebuild the bridge, then run
+`ros2 launch go2_mid360s_bridge inputs.launch.py` with the Livox driver already running.
+This launches the cloud adapter, a g-to-m/s² converter and a six-axis Madgwick filter.
+Do not also run a standalone cloud adapter. The SI converter expects the Livox protocol's
+acceleration in g and angular velocity in rad/s. Timestamps and gyro units are preserved.
+The filter keeps gravity and has relative yaw without a magnetometer.
+
+From another sourced terminal run `python3 tools/check_inputs.py --adapted`.
+This checks the outgoing PointCloud2 fields, scans one frame, and samples filtered IMU
+acceleration and orientation. An acceleration magnitude near 9.8 while stationary and
+a unit quaternion are basic input checks. Also verify roll/pitch direction under a
+known tilt before relying on the attitude.
+
+`config/mid360s_inputs.yaml` in the installed bridge share directory is a sensor-only
+LIO-SAM overlay for four lines with a starting column budget of 6000 per line.
+Review the maximum per-line count over a longer bag before final tuning.
+The overlay is not a full mapping configuration; supply the verified internal
+LiDAR/IMU transforms and robot mounting TF separately.

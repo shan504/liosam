@@ -1,0 +1,11 @@
+# Sensor input overrides only. Supply after the full LIO-SAM parameter file.
+# Configure the IMU extrinsics and robot TF independently before starting SLAM.
+/**:
+  ros__parameters:
+    sensor: livox
+    N_SCAN: 4
+    Horizon_SCAN: 6000
+    pointCloudTopic: /mid360s/points
+    imuTopic: /mid360s/imu
+    lidarFrame: livox_frame
+    useImuHeadingInitialization: false
