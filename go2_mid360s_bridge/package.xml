@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>go2_mid360s_bridge</name>
+  <version>0.1.0</version>
+  <description>Convert Livox custom point clouds for the LIO-SAM ROS 2 Livox input.</description>
+  <maintainer email="maintainer@example.invalid">Package maintainer</maintainer>
+  <license>Unspecified</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>livox_ros_driver2</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>
