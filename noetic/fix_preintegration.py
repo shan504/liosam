@@ -104,8 +104,11 @@ def install(package, workspace):
             finally:
                 if os.path.exists(temp):
                     os.unlink(temp)
-        subprocess.run(['catkin_make', '--pkg', 'lio_sam', '-j2', '-l2'],
-                       cwd=str(workspace), check=True)
+        # catkin_make resolves its workspace through PWD, even when cwd differs.
+        build_env = dict(os.environ, PWD=str(workspace))
+        subprocess.run(['catkin_make', '--directory', str(workspace),
+                        '--pkg', 'lio_sam', '-j2', '-l2'],
+                       cwd=str(workspace), env=build_env, check=True)
     except BaseException:
         for name in PATHS:
             shutil.copy2(backup / name, package / name)
