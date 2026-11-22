@@ -16,6 +16,7 @@ export ROS_MASTER_URI=http://127.0.0.1:11321 ROS_IP=127.0.0.1
 unset ROS_HOSTNAME
 case ${1:-} in
     --check-still) shift; exec /usr/bin/python3 -u "$here/check_alignment.py" "$@" ;;
+    --check-stream) shift; exec /usr/bin/python3 -u "$here/check_stream.py" "$@" ;;
     --check-returns) shift; exec /usr/bin/python3 -u "$here/check_returns.py" "$@" ;;
     --capture-still) shift; exec /usr/bin/python3 -u "$here/capture_still.py" "$@" ;;
 esac
@@ -84,7 +85,7 @@ if sys.argv[3] == "--check":
     print(state)
     sys.exit(0)
 if sys.argv[3]:
-    sys.exit("用法：bash live_detail.sh [--check-still | --capture-still | --check-returns]")
+    sys.exit("用法：bash live_detail.sh [--check-still | --capture-still | --check-returns | --check-stream]")
 if state == "reuse":
     print("已复用 ROS master 11321 上的 go2_detail_local，当前轮几何细节输出已注册。")
     sys.exit(0)
