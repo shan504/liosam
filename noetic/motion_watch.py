@@ -72,7 +72,7 @@ class Watch:
 def main():
     import rospy
     from nav_msgs.msg import Odometry
-    from visualization_msgs.msg import Marker
+    from geometry_msgs.msg import PoseStamped
     from rosgraph_msgs.msg import Log
     rospy.init_node('go2_motion_watch')
     watch = Watch()
@@ -80,7 +80,7 @@ def main():
     topics = [('建图', '/lio_sam/mapping/odometry', Odometry),
               ('增量', '/lio_sam/mapping/odometry_incremental', Odometry),
               ('预测', predictor, Odometry),
-              ('模型', '/go2_visual/live/model_mesh', Marker)]
+              ('模型', '/go2_visual/live/model_pose', PoseStamped)]
     subs = [rospy.Subscriber(t, cls, watch.receive, callback_args=label, queue_size=400,
                             buff_size=4*1024*1024, tcp_nodelay=True) for label, t, cls in topics]
 
@@ -88,7 +88,7 @@ def main():
         if 'lio_sam' in message.name and message.level >= Log.WARN:
             print('运动告警 | %s | %s' % (message.name, message.msg), flush=True)
     subs.append(rospy.Subscriber('/rosout', Log, log, queue_size=50))
-    print('运动检查已启动：每4秒输出源时间戳步长；这是观测值，不自动判定真实运动为漂移。', flush=True)
+    print('运动检查已启动：每4秒输出源时间戳步长。预测流含优化回写，跨回写步长不能直接换算为实机速度。', flush=True)
     while not rospy.is_shutdown():
         for _ in range(40):
             if rospy.is_shutdown():

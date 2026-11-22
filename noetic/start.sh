@@ -16,7 +16,7 @@ for setup in /opt/ros/noetic/setup.bash "$HOME/mid360s_nk_noetic_ws/devel/setup.
 done
 export ROS_MASTER_URI=http://127.0.0.1:11321 ROS_IP=127.0.0.1
 unset ROS_HOSTNAME
-for file in "$here/dense_map.py" "$here/live_detail.sh" "$here/local_detail.py" "$here/motion_watch.py" "$HOME/go2_farm_ground/start_ground.sh" \
+for file in "$here/dense_map.py" "$here/live_detail.sh" "$here/local_detail.py" "$here/motion_watch.py" "$here/model_tf.py" "$HOME/go2_farm_ground/start_ground.sh" \
             "$HOME/go2_model_live.pyz"; do
     [[ -r $file ]] || { echo "缺少已验证的显示文件：$file" >&2; exit 1; }
 done
@@ -342,7 +342,7 @@ fi
 start E_ground /bin/bash "$HOME/go2_farm_ground/start_ground.sh" --height 0.50
 start F_dense /usr/bin/python3 -u "$here/dense_map.py" \
     "_archive_dir:=$run_dir/dense" _voxel:=0.015 _fine_voxel:=0.0075 _max_points:=450000 _scan_period:=0.09 _period:=3.5
-start G_model /usr/bin/python3 -u "$HOME/go2_model_live.pyz"
+start G_model /usr/bin/python3 -u "$here/model_tf.py"
 start H_detail /bin/bash "$here/live_detail.sh"
 start I_motion /usr/bin/python3 -u "$here/motion_watch.py"
 echo "已启动。保持机器狗在平整地面静止，等待本窗口提示“地面已锁定”。"
