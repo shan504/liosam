@@ -1,0 +1,3 @@
+[
+  "^(?!/(?:lio_sam|livox|mid360s)(?:/|$)|/go2_visual/(?:dense_map|model_mesh)$).*"
+]

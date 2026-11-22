@@ -321,13 +321,15 @@ wait_topic /lio_sam/mapping/odometry/header
 
 if [[ $bridge_state == start ]]; then
     bridge_args=(port:=8766)
-    for option in "topic_whitelist:=['^(?!/lio_sam/mapping/loop_closure_constraints$).*']" \
+    display_topics=$(/usr/bin/python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$here/bridge_topics.json")
+    for option in "topic_whitelist:=$display_topics" \
                   send_buffer_limit:=25165824; do
         if roslaunch -p 11321 --dump-params foxglove_bridge foxglove_bridge.launch \
                 "${bridge_args[@]}" "$option" >"$run_dir/D_bridge_params.yaml" 2>"$run_dir/D_bridge_options.log"; then
             bridge_args+=("$option")
         else
-            echo "当前 bridge launch 未接受 $option，使用其已验证参数。"
+            echo "当前 bridge launch 未接受 $option，请查看 $run_dir/D_bridge_options.log。" >&2
+            exit 1
         fi
     done
     start D_bridge roslaunch -p 11321 foxglove_bridge foxglove_bridge.launch "${bridge_args[@]}"
