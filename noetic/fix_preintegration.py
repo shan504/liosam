@@ -17,11 +17,17 @@ def replace_once(text, old, new):
     return text.replace(old, new, 1)
 
 def transform(files):
-    if all(MARK in value for value in files.values()):
-        return dict(files)
-    if any(MARK in value for value in files.values()):
-        raise ValueError('检测到不完整的旧补丁，请先恢复同一份备份')
     result = dict(files)
+    header = result['include/utility.h']
+    if '#include <opencv/cv.h>' in header:
+        header = replace_once(header, '#include <opencv/cv.h>',
+                              '#include <opencv2/opencv.hpp>')
+    result['include/utility.h'] = header
+    reset_sources = [files[name] for name in PATHS if name != 'include/utility.h']
+    if all(MARK in value for value in reset_sources):
+        return result
+    if any(MARK in value for value in reset_sources):
+        raise ValueError('检测到不完整的旧补丁，请先恢复同一份备份')
     p = 'src/imuPreintegration.cpp'
     s = result[p]
     s = replace_once(s, '    void resetParams()\n    {',
@@ -72,7 +78,7 @@ def transform(files):
     return result
 
 PATHS = ('src/imuPreintegration.cpp', 'msg/cloud_info.msg',
-         'src/imageProjection.cpp', 'src/mapOptmization.cpp')
+         'src/imageProjection.cpp', 'src/mapOptmization.cpp', 'include/utility.h')
 
 def install(package, workspace):
     package, workspace = Path(package).resolve(), Path(workspace).resolve()
