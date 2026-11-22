@@ -39,3 +39,19 @@ Only after checking the publisher, freshness and frame/time relationship should
 native odometry constrain registration. Original maps remain untouched.
 
 Local checks cover the actual mesh sole height, unchanged rigid placement, per-new-stamp TF emission, duplicate-stamp rejection and single mesh publication. ROS2 availability and robot motion accuracy remain unverified here.
+
+
+## ROS2 runtime correction
+
+The original `patches/dds/run.sh` runs Humble and `/ros2_ws/install/setup.bash`
+inside the existing `go2-ros2-sdk:edu` Docker image, on host networking with DDS
+domain 0 and the host `~/cyclonedds_ws/cyclonedds.xml` mounted read-only. The
+first native probe mistakenly preferred host Foxy, whose CycloneDDS rejected
+that configuration's `Interfaces` element before creating a node.
+
+The probe now reuses the original image, setup files and DDS configuration.
+It launches only the odometry subscriber in a disposable container. It does not
+stop the existing `go2-sdk` container, launch the old navigation/control stack,
+rewrite XML, change ROS1 TF or inject native odometry into LIO-SAM. This repairs
+the diagnostic runtime mismatch; it is not evidence that the mapping drift is
+fixed. Missing local image/configuration is reported before launching a container.
