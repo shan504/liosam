@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Reuse shan504/go2 patches/dds/run.sh's proven ROS2 runtime, not host Foxy.
+# Reuse shan504/go2 go2_3d/run.sh's ROS2 runtime, not the legacy 2D entry point.
 # This container runs only the read-only odometry subscriber, never the control stack.
 set -euo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-dds_file="$HOME/cyclonedds_ws/cyclonedds.xml"
-image=go2-ros2-sdk:edu
+dds_file="${GO2_DDS_FILE:-$HOME/cyclonedds_ws/cyclonedds.xml}"
+image=go2-3d:edu
+case "${1:-}" in
+    ''|--robot-network) ;;
+    *) echo 'Usage: check_native.sh [--robot-network]' >&2; exit 2 ;;
+esac
 [[ -r $dds_file ]] || { echo "缺少原仓库使用的 DDS 配置：$dds_file" >&2; exit 1; }
 [[ -r $here/check_native.py ]] || { echo '缺少 check_native.py' >&2; exit 1; }
 command -v docker >/dev/null || { echo '未找到原系统的 Docker。未改用宿主机 Foxy。' >&2; exit 1; }
@@ -49,9 +53,14 @@ if ! sudo docker image inspect "$image" >/dev/null 2>&1; then
 fi
 echo "复用原 go2 运行环境：$image；Humble + /ros2_ws；DDS domain 0。"
 echo "使用现有配置 $dds_file。保持实机静止；只订阅里程计，不启动建图或控制容器。"
+dds_uri=file:///etc/cyclonedds.xml
+if [[ "${1:-}" == --robot-network ]]; then
+    dds_uri=$(/usr/bin/python3 "$here/native_dds_config.py" "$dds_file")
+    echo '本检查进程明确选择 eth0 上的 192.168.123.18；原 XML、网卡地址和路由均保留。'
+fi
 exec sudo docker run --rm --init --network host \
     -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
-    -e CYCLONEDDS_URI=file:///etc/cyclonedds.xml \
+    -e "CYCLONEDDS_URI=$dds_uri" \
     -e ROS_LOCALHOST_ONLY=0 -e PYTHONUNBUFFERED=1 \
     -v "$dds_file:/etc/cyclonedds.xml:ro" \
     -v "$here/check_native.py:/opt/go2_native_check.py:ro" \

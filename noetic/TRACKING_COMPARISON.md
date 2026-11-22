@@ -55,3 +55,12 @@ stop the existing `go2-sdk` container, launch the old navigation/control stack,
 rewrite XML, change ROS1 TF or inject native odometry into LIO-SAM. This repairs
 the diagnostic runtime mismatch; it is not evidence that the mapping drift is
 fixed. Missing local image/configuration is reported before launching a container.
+
+
+## Native DDS address selection and actual 3D runtime
+
+The earlier runtime correction used the legacy `patches/dds/run.sh` image. The current working 3D entry point in `shan504/go2` is `go2_3d/run.sh`, which uses `go2-3d:edu`, Humble, `/ros2_ws/install/setup.bash`, domain 0 and `${GO2_DDS_FILE:-$HOME/cyclonedds_ws/cyclonedds.xml}`. The probe now uses that same 3D image and configuration override; it does not start the mapping/navigation launch.
+
+Observed host eth0 carries both 192.168.123.18/24 (robot) and 192.168.1.5/32 (MID-360). `check_native.sh --robot-network` creates an in-memory XML copy selecting the exact observed robot address. The original XML, multicast policy, routes and LiDAR address are preserved. CycloneDDS documents exact-address selection for interfaces with multiple addresses: https://cyclonedds.io/docs/cyclonedds/0.10.5/config/cyclonedds_specifics.html#networking-interfaces . Address ambiguity is a hypothesis, not a confirmed cause of the missing DDS participants or mapping drift. Success requires live native messages on the robot.
+
+Local validation covers XML preservation, missing-address rejection, namespaced configuration, launcher arguments and no persistent network edits. No on-robot DDS or drift test has been performed here.
