@@ -16,7 +16,7 @@ for setup in /opt/ros/noetic/setup.bash "$HOME/mid360s_nk_noetic_ws/devel/setup.
 done
 export ROS_MASTER_URI=http://127.0.0.1:11321 ROS_IP=127.0.0.1
 unset ROS_HOSTNAME
-for file in "$here/dense_map.py" "$here/live_detail.sh" "$here/local_detail.py" "$HOME/go2_farm_ground/start_ground.sh" \
+for file in "$here/dense_map.py" "$here/live_detail.sh" "$here/local_detail.py" "$here/motion_watch.py" "$HOME/go2_farm_ground/start_ground.sh" \
             "$HOME/go2_model_live.pyz"; do
     [[ -r $file ]] || { echo "缺少已验证的显示文件：$file" >&2; exit 1; }
 done
@@ -222,9 +222,9 @@ check_alive() {
     local i
     for i in "${!pids[@]}"; do
         if ! kill -0 "${pids[i]}" 2>/dev/null; then
-            if [[ ${names[i]} == H_detail ]]; then
-                echo '几何细节进程已退出或复用了已有显示。建图继续运行，请查看 H_detail.log。' >&2
-                tail -n 12 "$run_dir/H_detail.log" >&2
+            if [[ ${names[i]} == H_detail || ${names[i]} == I_motion ]]; then
+                echo "${names[i]} 辅助进程已退出；建图继续运行，请查看其日志。" >&2
+                tail -n 12 "$run_dir/${names[i]}.log" >&2
                 wait "${pids[i]}" 2>/dev/null || true
                 unset 'pids[i]' 'names[i]'
                 continue
@@ -235,11 +235,11 @@ check_alive() {
         fi
     done
 }
-declare -A progress_lines=([E_ground]=0 [F_dense]=0 [G_model]=0)
+declare -A progress_lines=([E_ground]=0 [F_dense]=0 [G_model]=0 [I_motion]=0)
 declare -A progress_seen=()
 show_progress() {
     local name count line
-    for name in E_ground F_dense G_model; do
+    for name in E_ground F_dense G_model I_motion; do
         [[ -f $run_dir/$name.log ]] || continue
         count=$(wc -l <"$run_dir/$name.log")
         if (( count > progress_lines[$name] )); then
@@ -251,6 +251,7 @@ show_progress() {
                             progress_seen[$name]=1
                         fi
                         ;;
+                    I_motion:*) printf '%s\n' "$line" ;;
                     F_dense:*Dense:*scans\ saved*) printf '%s\n' "$line" ;;
                 esac
             done < <(sed -n "$((progress_lines[$name]+1)),${count}p" "$run_dir/$name.log")
@@ -313,6 +314,8 @@ wait_topic /mid360s/imu_filtered/header
 rosparam load "$lio_share/config/paramsLivoxIMU.yaml"
 rosparam set /lio_sam/imuTopic /mid360s/imu_filtered
 rosparam set /lio_sam/imuType 1
+# Disable supplemental synthesized-attitude correction in incremental odometry.
+rosparam set /lio_sam/imuRPYWeight 0.0
 rosparam set /lio_sam/extrinsicRPY '[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]'
 rosparam set /lio_sam/useImuHeadingInitialization false
 rosparam set /lio_sam/savePCD false
@@ -341,6 +344,7 @@ start F_dense /usr/bin/python3 -u "$here/dense_map.py" \
     "_archive_dir:=$run_dir/dense" _voxel:=0.015 _fine_voxel:=0.0075 _max_points:=450000 _scan_period:=0.09 _period:=3.5
 start G_model /usr/bin/python3 -u "$HOME/go2_model_live.pyz"
 start H_detail /bin/bash "$here/live_detail.sh"
+start I_motion /usr/bin/python3 -u "$here/motion_watch.py"
 echo "已启动。保持机器狗在平整地面静止，等待本窗口提示“地面已锁定”。"
 echo 'Foxglove 连接端口 8766。保留本窗口，Ctrl+C 停止本次进程并保留归档。'
 while :; do sleep 2; check_alive; show_progress; done

@@ -16,6 +16,29 @@ def replace_once(text, old, new):
         raise ValueError('源码结构与此补丁不符，定位失败：'+old[:85])
     return text.replace(old, new, 1)
 
+
+def motion_feedback(files):
+    """Honor the attitude weight in the correction fed back to preintegration."""
+    result = dict(files)
+    name = 'src/mapOptmization.cpp'
+    s = result[name]
+    mark = 'GO2_IMU_FEEDBACK_WEIGHT_V1'
+    if mark in s:
+        if 'double imuWeight = 0.1;' in s[s.index('    void publishOdometry()'):]:
+            raise ValueError('姿态反馈补丁标记存在但仍有硬编码权重')
+        return result
+    a, b = s.index('    void publishOdometry()'), s.index('    void publishFrames()')
+    block = s[a:b]
+    block = replace_once(block, '            if (cloudInfo.imuAvailable == true)',
+        '            // '+mark+'\n'
+        '            // A synthesized six-axis attitude is not an independent correction.\n'
+        '            // Keep initialization and gyro deskew; respect the configured fusion weight.\n'
+        '            if (cloudInfo.imuAvailable && imuType == 1 && imuRPYWeight > 0.0)')
+    block = replace_once(block, '                    double imuWeight = 0.1;',
+        '                    double imuWeight = imuRPYWeight;')
+    result[name] = s[:a]+block+s[b:]
+    return result
+
 def transform(files):
     result = dict(files)
     header = result['include/utility.h']
@@ -27,7 +50,7 @@ def transform(files):
     result['include/utility.h'] = header
     reset_sources = [files[name] for name in PATHS if name != 'include/utility.h']
     if all(MARK in value for value in reset_sources):
-        return result
+        return motion_feedback(result)
     if any(MARK in value for value in reset_sources):
         raise ValueError('检测到不完整的旧补丁，请先恢复同一份备份')
     p = 'src/imuPreintegration.cpp'
@@ -77,7 +100,7 @@ def transform(files):
         '    void scan2MapOptimization()\n    {\n'
         '        incrementalOdometryAffineBack = trans2Affine3f(transformTobeMapped);')
     result[p] = s
-    return result
+    return motion_feedback(result)
 
 PATHS = ('src/imuPreintegration.cpp', 'msg/cloud_info.msg',
          'src/imageProjection.cpp', 'src/mapOptmization.cpp', 'include/utility.h')
@@ -122,7 +145,7 @@ def install(package, workspace):
             shutil.copy2(backup / name, package / name)
         print('编译未完成，已恢复原源码。请保留编译错误，完成重新编译后再启动。', file=sys.stderr)
         raise
-    print('预积分状态、重置编号、建图初值衔接已编译完成。', flush=True)
+    print('预积分重置及增量里程计姿态反馈修复已编译完成。', flush=True)
 
 if __name__ == '__main__':
     try:
