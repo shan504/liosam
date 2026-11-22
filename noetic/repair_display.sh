@@ -1,16 +1,7 @@
 #!/usr/bin/env bash
+# Compatibility entry point: never unload a running Foxglove nodelet.
 set -eo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-if [[ ${GO2_DISPLAY_CLEAN_ENV:-} != 1 ]]; then
-    exec env -i HOME="$HOME" USER="${USER:-$(id -un)}" TERM="${TERM:-xterm}" \
-        LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-        GO2_DISPLAY_CLEAN_ENV=1 /bin/bash "$here/repair_display.sh" "$@"
-fi
-source /opt/ros/noetic/setup.bash
-source "$HOME/mid360s_nk_noetic_ws/devel/setup.bash" --extend
-export ROS_MASTER_URI=http://127.0.0.1:11321 ROS_IP=127.0.0.1
-unset ROS_HOSTNAME
-mkdir -p "$HOME/.ros"
-exec 8>"$HOME/.ros/go2_display_reload.lock"
-flock -n 8 || { echo '另一个显示修复正在运行。'; exit 1; }
-/usr/bin/python3 -u "$here/repair_display.py"
+echo '已取消显示桥热卸载。请先在原启动窗口 Ctrl+C，等待退出。'
+echo '现在进入正常启动流程；检测到旧建图节点时会停止，旧归档保留。'
+exec /bin/bash "$here/start.sh" "$@"
