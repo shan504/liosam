@@ -19,9 +19,11 @@ def replace_once(text, old, new):
 def transform(files):
     result = dict(files)
     header = result['include/utility.h']
-    if '#include <opencv/cv.h>' in header:
-        header = replace_once(header, '#include <opencv/cv.h>',
-                              '#include <opencv2/opencv.hpp>')
+    # Only core Mat/Scalar, eigen, transpose and solve are used here.
+    # The umbrella header also includes cvflann, whose macros clash with PCL FLANN.
+    for include in ('#include <opencv/cv.h>', '#include <opencv2/opencv.hpp>'):
+        if include in header:
+            header = replace_once(header, include, '#include <opencv2/core.hpp>')
     result['include/utility.h'] = header
     reset_sources = [files[name] for name in PATHS if name != 'include/utility.h']
     if all(MARK in value for value in reset_sources):
