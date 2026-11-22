@@ -1,0 +1,826 @@
+{
+  "configById": {
+    "3D!g2initial": {
+      "followTf": "go2_ground",
+      "followMode": "follow-pose",
+      "cameraState": {
+        "perspective": true,
+        "distance": 8.5,
+        "phi": 59,
+        "thetaOffset": 120,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.01,
+        "far": 5000
+      },
+      "scene": {
+        "backgroundColor": "#000000",
+        "meshUpAxis": "z_up",
+        "transforms": {
+          "showLabel": false,
+          "axisScale": 0,
+          "lineWidth": 0
+        }
+      },
+      "transforms": {
+        "frame:odom": {
+          "visible": false
+        },
+        "frame:map": {
+          "visible": false
+        },
+        "frame:lidar_link": {
+          "visible": false
+        },
+        "frame:livox_frame": {
+          "visible": false
+        },
+        "frame:base_link": {
+          "visible": false
+        },
+        "frame:base_footprint": {
+          "visible": false
+        },
+        "frame:go2_visual/base_link": {
+          "visible": false
+        },
+        "frame:go2_ground": {
+          "visible": false
+        },
+        "frame:go2_ground_focus": {
+          "visible": false
+        }
+      },
+      "topics": {
+        "/map": {
+          "visible": false,
+          "colorMode": "map",
+          "alpha": 0.65
+        },
+        "/map_cloud": {
+          "visible": false
+        },
+        "/registered_cloud": {
+          "visible": false
+        },
+        "/global_costmap/costmap": {
+          "visible": false,
+          "colorMode": "costmap",
+          "alpha": 0.3
+        },
+        "/local_costmap/costmap": {
+          "visible": false,
+          "colorMode": "costmap",
+          "alpha": 0.3
+        },
+        "/plan": {
+          "visible": true
+        },
+        "/local_plan": {
+          "visible": true
+        },
+        "/global_costmap/published_footprint": {
+          "visible": true
+        },
+        "/local_costmap/published_footprint": {
+          "visible": true
+        },
+        "/initialpose": {
+          "visible": true
+        },
+        "/goal_pose": {
+          "visible": true
+        },
+        "/point_cloud2": {
+          "visible": false
+        },
+        "/navigation/waypoints": {
+          "visible": true
+        },
+        "/lio_sam/imu/path": {
+          "visible": false
+        },
+        "/lio_sam/mapping/odometry": {
+          "visible": false
+        },
+        "/lio_sam/mapping/odometry_incremental": {
+          "visible": false
+        },
+        "/lio_sam/mapping/trajectory": {
+          "visible": false
+        },
+        "/lio_sam/mapping/path": {
+          "visible": false
+        },
+        "/lio_sam/mapping/map_global": {
+          "visible": false
+        },
+        "/lio_sam/mapping/map_local": {
+          "visible": false
+        },
+        "/lio_sam/deskew/cloud_deskewed": {
+          "visible": false
+        },
+        "/lio_sam/mapping/cloud_registered": {
+          "visible": false
+        },
+        "/lio_sam/feature/cloud_corner": {
+          "visible": false
+        },
+        "/lio_sam/feature/cloud_surface": {
+          "visible": false
+        },
+        "/lio_sam/mapping/loop_closure_constraints": {
+          "visible": false
+        },
+        "/lio_sam/mapping/icp_loop_closure_history_cloud": {
+          "visible": false
+        },
+        "/lio_sam/mapping/icp_loop_closure_corrected_cloud": {
+          "visible": false
+        },
+        "/go2_visual/dense_rgb": {
+          "visible": false
+        },
+        "/go2_visual/floor_grid": {
+          "visible": false
+        },
+        "/livox/lidar": {
+          "visible": false
+        },
+        "/livox/imu": {
+          "visible": false
+        },
+        "/mid360s/imu_filtered": {
+          "visible": false
+        },
+        "/mid360s/imu_si": {
+          "visible": false
+        },
+        "/odometry/imu": {
+          "visible": false
+        },
+        "/odometry/imu_incremental": {
+          "visible": false
+        },
+        "/lio_sam/imu/odometry": {
+          "visible": false
+        },
+        "/tf": {
+          "visible": false
+        },
+        "/tf_static": {
+          "visible": false
+        },
+        "/robot_description": {
+          "visible": false
+        },
+        "/go2_visual/robot_description": {
+          "visible": false
+        },
+        "/go2_visual/dense_map": {
+          "visible": false
+        },
+        "/lio_sam/mapping/cloud_registered_raw": {
+          "visible": false
+        },
+        "/go2_visual/model_mesh": {
+          "visible": false
+        },
+        "/go2_visual/ground/dense_map": {
+          "visible": true,
+          "pointSize": 1.0,
+          "colorMode": "colormap",
+          "colorField": "z",
+          "colorMap": "turbo",
+          "decayTime": 0,
+          "minValue": 0.0,
+          "maxValue": 3.5
+        },
+        "/go2_visual/ground/scan": {
+          "visible": false,
+          "pointSize": 1.35,
+          "colorMode": "flat",
+          "flatColor": "#428090B5",
+          "decayTime": 0,
+          "colorField": "z"
+        },
+        "/go2_visual/ground/reference": {
+          "visible": true,
+          "namespaces": {
+            "ground_grid_1m": {
+              "visible": false
+            },
+            "ground_grid_5m": {
+              "visible": false
+            },
+            "axis_X": {
+              "visible": true
+            },
+            "axis_Y": {
+              "visible": true
+            },
+            "axis_Z": {
+              "visible": true
+            },
+            "axis_label_X": {
+              "visible": true
+            },
+            "axis_label_Y": {
+              "visible": true
+            },
+            "axis_label_Z": {
+              "visible": true
+            }
+          }
+        },
+        "/go2_visual/floor/model_mesh": {
+          "visible": false
+        },
+        "/go2_visual/floor/surface": {
+          "visible": false
+        },
+        "/go2_visual/floor/observed_map": {
+          "visible": false,
+          "colorMode": "custom",
+          "minColor": "#FFFFFFFF",
+          "maxColor": "#1B2026FF",
+          "unknownColor": "#899099FF",
+          "alpha": 1
+        },
+        "/go2_visual/live/model_mesh": {
+          "visible": true
+        },
+        "/go2_visual/live/surface": {
+          "visible": true,
+          "namespaces": {
+            "floor_plane": {
+              "visible": true
+            },
+            "grid_minor": {
+              "visible": true
+            },
+            "grid_major": {
+              "visible": true
+            }
+          }
+        },
+        "/go2_visual/detail/local": {
+          "visible": true,
+          "pointSize": 1.0,
+          "colorMode": "colormap",
+          "colorField": "z",
+          "colorMap": "turbo",
+          "decayTime": 0,
+          "minValue": 0.0,
+          "maxValue": 3.5
+        }
+      },
+      "layers": {
+        "f08e48ef-dc56-4375-bd6b-adcc06685fbb": {
+          "visible": false,
+          "instanceId": "f08e48ef-dc56-4375-bd6b-adcc06685fbb",
+          "layerId": "foxglove.Urdf",
+          "order": 1,
+          "label": "Go2 URDF（可选）",
+          "sourceType": "topic",
+          "topic": "/go2_visual/robot_description",
+          "framePrefix": "",
+          "frameLocked": true,
+          "displayMode": "visual",
+          "showAxis": false
+        }
+      },
+      "imageMode": {},
+      "publish": {
+        "type": "pose_estimate",
+        "poseTopic": "/goal_pose",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "fixedFrame": "go2_ground",
+      "foxglovePanelTitle": "三维建图"
+    },
+    "3D!g2goal": {
+      "followTf": "go2_ground",
+      "followMode": "follow-pose",
+      "cameraState": {
+        "perspective": false,
+        "distance": 12,
+        "phi": 0,
+        "thetaOffset": 0,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.01,
+        "far": 5000
+      },
+      "scene": {
+        "backgroundColor": "#000000",
+        "meshUpAxis": "z_up",
+        "transforms": {
+          "showLabel": false,
+          "axisScale": 0,
+          "lineWidth": 0
+        }
+      },
+      "transforms": {
+        "frame:odom": {
+          "visible": false
+        },
+        "frame:map": {
+          "visible": false
+        },
+        "frame:lidar_link": {
+          "visible": false
+        },
+        "frame:livox_frame": {
+          "visible": false
+        },
+        "frame:base_link": {
+          "visible": false
+        },
+        "frame:base_footprint": {
+          "visible": false
+        },
+        "frame:go2_visual/base_link": {
+          "visible": false
+        },
+        "frame:go2_ground": {
+          "visible": false
+        },
+        "frame:go2_ground_focus": {
+          "visible": false
+        }
+      },
+      "topics": {
+        "/map": {
+          "visible": true,
+          "colorMode": "map",
+          "alpha": 0.65
+        },
+        "/map_cloud": {
+          "visible": false
+        },
+        "/registered_cloud": {
+          "visible": false
+        },
+        "/global_costmap/costmap": {
+          "visible": true,
+          "colorMode": "costmap",
+          "alpha": 0.3
+        },
+        "/local_costmap/costmap": {
+          "visible": false,
+          "colorMode": "costmap",
+          "alpha": 0.3
+        },
+        "/plan": {
+          "visible": true
+        },
+        "/local_plan": {
+          "visible": true
+        },
+        "/global_costmap/published_footprint": {
+          "visible": true
+        },
+        "/local_costmap/published_footprint": {
+          "visible": true
+        },
+        "/initialpose": {
+          "visible": true
+        },
+        "/goal_pose": {
+          "visible": true
+        },
+        "/point_cloud2": {
+          "visible": false
+        },
+        "/navigation/waypoints": {
+          "visible": true
+        },
+        "/lio_sam/imu/path": {
+          "visible": false
+        },
+        "/lio_sam/mapping/odometry": {
+          "visible": false
+        },
+        "/lio_sam/mapping/odometry_incremental": {
+          "visible": false
+        },
+        "/lio_sam/mapping/trajectory": {
+          "visible": false
+        },
+        "/lio_sam/mapping/path": {
+          "visible": false
+        },
+        "/lio_sam/mapping/map_global": {
+          "visible": false
+        },
+        "/lio_sam/mapping/map_local": {
+          "visible": false
+        },
+        "/lio_sam/deskew/cloud_deskewed": {
+          "visible": false
+        },
+        "/lio_sam/mapping/cloud_registered": {
+          "visible": false
+        },
+        "/lio_sam/feature/cloud_corner": {
+          "visible": false
+        },
+        "/lio_sam/feature/cloud_surface": {
+          "visible": false
+        },
+        "/lio_sam/mapping/loop_closure_constraints": {
+          "visible": false
+        },
+        "/lio_sam/mapping/icp_loop_closure_history_cloud": {
+          "visible": false
+        },
+        "/lio_sam/mapping/icp_loop_closure_corrected_cloud": {
+          "visible": false
+        },
+        "/go2_visual/dense_rgb": {
+          "visible": false
+        },
+        "/go2_visual/floor_grid": {
+          "visible": false
+        },
+        "/livox/lidar": {
+          "visible": false
+        },
+        "/livox/imu": {
+          "visible": false
+        },
+        "/mid360s/imu_filtered": {
+          "visible": false
+        },
+        "/mid360s/imu_si": {
+          "visible": false
+        },
+        "/odometry/imu": {
+          "visible": false
+        },
+        "/odometry/imu_incremental": {
+          "visible": false
+        },
+        "/lio_sam/imu/odometry": {
+          "visible": false
+        },
+        "/tf": {
+          "visible": false
+        },
+        "/tf_static": {
+          "visible": false
+        },
+        "/robot_description": {
+          "visible": false
+        },
+        "/go2_visual/robot_description": {
+          "visible": false
+        },
+        "/go2_visual/dense_map": {
+          "visible": false
+        },
+        "/lio_sam/mapping/cloud_registered_raw": {
+          "visible": false
+        },
+        "/go2_visual/model_mesh": {
+          "visible": false
+        },
+        "/go2_visual/ground/dense_map": {
+          "visible": false,
+          "pointSize": 1,
+          "colorMode": "colormap",
+          "colorField": "z",
+          "colorMap": "turbo",
+          "decayTime": 0
+        },
+        "/go2_visual/ground/scan": {
+          "visible": true,
+          "pointSize": 1.6,
+          "colorMode": "colormap",
+          "decayTime": 0.7,
+          "colorField": "z",
+          "colorMap": "turbo"
+        },
+        "/go2_visual/ground/reference": {
+          "visible": true,
+          "namespaces": {
+            "ground_grid_1m": {
+              "visible": false
+            },
+            "ground_grid_5m": {
+              "visible": false
+            },
+            "axis_X": {
+              "visible": true
+            },
+            "axis_Y": {
+              "visible": true
+            },
+            "axis_Z": {
+              "visible": true
+            },
+            "axis_label_X": {
+              "visible": true
+            },
+            "axis_label_Y": {
+              "visible": true
+            },
+            "axis_label_Z": {
+              "visible": true
+            }
+          }
+        },
+        "/go2_visual/floor/observed_map": {
+          "visible": false
+        },
+        "/go2_visual/floor/surface": {
+          "visible": false
+        },
+        "/go2_visual/floor/model_mesh": {
+          "visible": false
+        },
+        "/go2_visual/live/model_mesh": {
+          "visible": true
+        },
+        "/go2_visual/live/surface": {
+          "visible": true,
+          "namespaces": {
+            "floor_plane": {
+              "visible": true
+            },
+            "grid_minor": {
+              "visible": true
+            },
+            "grid_major": {
+              "visible": true
+            }
+          }
+        }
+      },
+      "layers": {
+        "0a27bf37-b645-48a6-86f0-66e67a3cb4ee": {
+          "visible": false,
+          "instanceId": "0a27bf37-b645-48a6-86f0-66e67a3cb4ee",
+          "layerId": "foxglove.Urdf",
+          "order": 1,
+          "label": "Go2 URDF（可选）",
+          "sourceType": "topic",
+          "topic": "/go2_visual/robot_description",
+          "framePrefix": "",
+          "frameLocked": true,
+          "displayMode": "visual",
+          "showAxis": false
+        }
+      },
+      "imageMode": {},
+      "publish": {
+        "type": "pose",
+        "poseTopic": "/goal_pose",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "fixedFrame": "go2_ground",
+      "foxglovePanelTitle": "实时扫描"
+    },
+    "Publish!g2enable": {
+      "topicName": "/control/enable",
+      "datatype": "std_msgs/Bool",
+      "value": "{\"data\":true}",
+      "advancedView": true,
+      "buttonText": "启用运动",
+      "buttonTooltip": "启用运动",
+      "buttonColor": "#227b3a"
+    },
+    "Publish!g2stop": {
+      "topicName": "/control/enable",
+      "datatype": "std_msgs/Bool",
+      "value": "{\"data\":false}",
+      "advancedView": true,
+      "buttonText": "停止运动＋取消导航",
+      "buttonTooltip": "停止运动＋取消导航",
+      "buttonColor": "#c52430"
+    },
+    "Publish!g2cancel": {
+      "topicName": "/navigation/cancel",
+      "datatype": "std_msgs/Empty",
+      "value": "{}",
+      "advancedView": true,
+      "buttonText": "取消当前目标",
+      "buttonTooltip": "取消当前目标",
+      "buttonColor": "#b76b12"
+    },
+    "Image!g2camera": {
+      "followTf": "map",
+      "followMode": "follow-none",
+      "cameraState": {
+        "perspective": false,
+        "distance": 12,
+        "phi": 0,
+        "thetaOffset": 0,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.01,
+        "far": 5000
+      },
+      "scene": {
+        "backgroundColor": "#ffffff",
+        "meshUpAxis": "z_up",
+        "transforms": {
+          "showLabel": false,
+          "axisScale": 0.3,
+          "lineWidth": 0
+        }
+      },
+      "transforms": {},
+      "topics": {
+        "/map": {
+          "visible": true,
+          "colorMode": "map",
+          "alpha": 0.65
+        },
+        "/map_cloud": {
+          "visible": true,
+          "pointSize": 1,
+          "colorMode": "colormap",
+          "colorField": "z",
+          "colorMap": "turbo",
+          "decayTime": 0
+        },
+        "/registered_cloud": {
+          "visible": true,
+          "pointSize": 2,
+          "colorMode": "flat",
+          "flatColor": "#36e5ffff",
+          "decayTime": 0
+        },
+        "/global_costmap/costmap": {
+          "visible": false,
+          "colorMode": "costmap",
+          "alpha": 0.3
+        },
+        "/local_costmap/costmap": {
+          "visible": false,
+          "colorMode": "costmap",
+          "alpha": 0.3
+        },
+        "/plan": {
+          "visible": true
+        },
+        "/local_plan": {
+          "visible": true
+        },
+        "/global_costmap/published_footprint": {
+          "visible": true
+        },
+        "/local_costmap/published_footprint": {
+          "visible": true
+        },
+        "/initialpose": {
+          "visible": true
+        },
+        "/goal_pose": {
+          "visible": true
+        },
+        "/point_cloud2": {
+          "visible": false
+        }
+      },
+      "layers": {},
+      "imageMode": {
+        "imageTopic": "/camera/image/compressed",
+        "synchronize": false
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/goal_pose",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "cameraTopic": "/camera/image/compressed"
+    },
+    "RawMessages!g2valid": {
+      "topicPath": "/localization/valid",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false
+    },
+    "RawMessages!g2gicp": {
+      "topicPath": "/localization/status",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false
+    },
+    "RawMessages!g2operator": {
+      "topicPath": "/operator/status",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "first": {
+      "first": {
+        "first": "3D!g2initial",
+        "second": "3D!g2goal",
+        "direction": "row",
+        "splitPercentage": 50
+      },
+      "second": {
+        "first": "Publish!g2enable",
+        "second": {
+          "first": "Publish!g2stop",
+          "second": "Publish!g2cancel",
+          "direction": "row",
+          "splitPercentage": 55
+        },
+        "direction": "row",
+        "splitPercentage": 30
+      },
+      "direction": "column",
+      "splitPercentage": 80
+    },
+    "second": {
+      "first": "Image!g2camera",
+      "second": {
+        "first": "RawMessages!g2valid",
+        "second": {
+          "first": "RawMessages!g2gicp",
+          "second": "RawMessages!g2operator",
+          "direction": "column",
+          "splitPercentage": 50
+        },
+        "direction": "column",
+        "splitPercentage": 25
+      },
+      "direction": "column",
+      "splitPercentage": 45
+    },
+    "direction": "row",
+    "splitPercentage": 75
+  }
+}

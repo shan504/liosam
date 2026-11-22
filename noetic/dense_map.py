@@ -78,17 +78,22 @@ class Display:
         self.scores = np.empty(0, np.float32)
         self.hash_cutoff = None
 
-    def add(self, pts):
+    def add(self, pts, *, stop_at=None):
         scaled = pts[:, :3].astype(np.float64) / self.voxel
         cells = np.floor(scaled)
-        keys = cell_ids(cells)
+        try:
+            keys = cell_ids(cells)
+        except ValueError:
+            if stop_at is not None:
+                return False
+            raise
         offset = scaled - cells - 0.5
         scores = np.einsum("ij,ij->i", offset, offset).astype(np.float32)
         if self.hash_cutoff is not None:
             keep = hashes(keys) <= self.hash_cutoff
             keys, pts, scores = keys[keep], pts[keep], scores[keep]
         if not len(keys):
-            return
+            return True
         # Use a measured return closest to each voxel center, including its
         # intensity. Averaging observations across a thin railing can put a
         # synthetic point in the gap, and a first-hit policy keeps noisy edges.
@@ -104,8 +109,10 @@ class Display:
         self.points[dst[better]] = pts[src[better]]
         self.scores[dst[better]] = scores[src[better]]
         if exists.all():
-            return
+            return True
         new_k, new_idx = fresh[~exists], idx[~exists]
+        if stop_at is not None and len(self.keys) + len(new_k) > stop_at:
+            return False
         # Merge the two sorted arrays without a full re-sort of the map.
         dest = self.keys.searchsorted(new_k) + np.arange(len(new_k))
         merged_k = np.empty(len(self.keys)+len(new_k), dtype=np.int64)
@@ -127,6 +134,7 @@ class Display:
             retain = weights <= self.hash_cutoff
             merged_k, merged_p, merged_s = merged_k[retain], merged_p[retain], merged_s[retain]
         self.keys, self.points, self.scores = merged_k, merged_p, merged_s
+        return True
 
 
 def pose_changed(first, latest, distance2, min_cos2):
@@ -144,9 +152,28 @@ def pose_changed(first, latest, distance2, min_cos2):
 
 class AnchoredDisplay(Display):
     """The pose actually used to render each contributing keyframe."""
-    def __init__(self, voxel, limit):
+    def __init__(self, voxel, limit, fine_voxel=0.):
         super().__init__(voxel, limit)
         self.anchors = {}
+        self.fine = Display(fine_voxel, limit) if fine_voxel else None
+        self.fine_limit = max(1, 9 * limit // 10)
+
+    def add(self, pts):
+        super().add(pts)
+        if self.fine is not None and not self.fine.add(pts, stop_at=self.fine_limit):
+            self.fine = None
+
+    def display_points(self):
+        if self.fine is None:
+            return self.points
+        # Preserve the parent cell's measured winner even when the nearest
+        # fine-cell winner would have been a different return. Do this only
+        # when publishing, with one output row per occupied fine cell.
+        points = self.fine.points.copy()
+        scaled = self.points[:, :3].astype(np.float64) / self.fine.voxel
+        idx = self.fine.keys.searchsorted(cell_ids(np.floor(scaled)))
+        points[idx] = self.points
+        return points
 
     def add_scan(self, anchor, local, pose, world=None, world_pose=None):
         baseline = self.anchors.setdefault(anchor, pose)
@@ -158,8 +185,11 @@ class AnchoredDisplay(Display):
 
 class MapPreview:
     """Continue growing the active map while a finite archive snapshot is replayed."""
-    def __init__(self, voxel, limit, distance, angle_deg, interval):
-        self.active = AnchoredDisplay(voxel, limit)
+    def __init__(self, voxel, limit, distance, angle_deg, interval, fine_voxel=0.):
+        if fine_voxel not in (0., voxel, voxel / 2):
+            raise ValueError("fine_voxel must be 0 (disabled), voxel, or half of voxel")
+        self.fine_voxel = fine_voxel if fine_voxel == voxel / 2 else 0.
+        self.active = AnchoredDisplay(voxel, limit, self.fine_voxel)
         self.building = None
         self.snapshot = {}
         self.distance2 = distance ** 2
@@ -170,6 +200,16 @@ class MapPreview:
         self.cursor = -1
         self.last_stamp = -1
 
+    def sync_resolution(self):
+        # Once either copy exhausts its detail allowance, keep the continuously
+        # maintained baseline for the rest of this session (including replays).
+        if self.fine_voxel and (self.active.fine is None or
+                               (self.building is not None and self.building.fine is None)):
+            self.fine_voxel = 0.
+            self.active.fine = None
+            if self.building is not None:
+                self.building.fine = None
+
     def add(self, stamp, anchor, local, latest, world, at_capture):
         self.last_stamp = stamp
         self.active.add_scan(anchor, local, latest, world, at_capture)
@@ -178,6 +218,7 @@ class MapPreview:
             # views exactly once so a growing input never moves the replay fence.
             pose = self.snapshot.setdefault(anchor, latest)
             self.building.add_scan(anchor, local, pose, world, at_capture)
+        self.sync_resolution()
 
     def maybe_begin(self, store, now):
         if self.building is not None or self.last_stamp < 0 or now < self.next_check:
@@ -188,7 +229,7 @@ class MapPreview:
             return False
         self.snapshot = store.poses.copy()
         self.through, self.cursor = self.last_stamp, -1
-        self.building = AnchoredDisplay(self.active.voxel, self.active.limit)
+        self.building = AnchoredDisplay(self.active.voxel, self.active.limit, self.fine_voxel)
         return True
 
     def advance(self, store, now, max_rows=2):
@@ -201,6 +242,7 @@ class MapPreview:
             local = np.frombuffer(blob, dtype='<f4').reshape(-1, 4)
             self.building.add_scan(anchor, local, self.snapshot[anchor])
             self.cursor = stamp
+        self.sync_resolution()
         if self.cursor < self.through:
             return False
         self.active, self.building = self.building, None
@@ -307,6 +349,7 @@ def run():
 
     rospy.init_node("go2_l1_style_dense")
     voxel = float(rospy.get_param("~voxel", .015))
+    fine_voxel = float(rospy.get_param("~fine_voxel", 0.))
     limit = int(rospy.get_param("~max_points", 450000))
     period = float(rospy.get_param("~period", 3.5))
     sample = float(rospy.get_param("~scan_period", .09))
@@ -323,7 +366,7 @@ def run():
         folder = tempfile.mkdtemp(prefix="mid360s_", dir=str(root))
     store = Archive(Path(folder).expanduser())
     rospy.loginfo("Archive=%s; registered scan -> world map, voxel %.3f m, display cap %d", store.file, voxel, limit)
-    preview = MapPreview(voxel, limit, distance, angle, interval)
+    preview = MapPreview(voxel, limit, distance, angle, interval, fine_voxel)
     inputs = Inputs()
     target = rospy.Publisher(OUTPUT, PointCloud2, queue_size=1, latch=True)
     fields = [PointField(n, 4*i, PointField.FLOAT32, 1) for i,n in enumerate(("x","y","z","intensity"))]
@@ -365,15 +408,15 @@ def run():
             if preview.advance(store, now):
                 dirty = True
             if dirty and now-last_pub >= period and len(preview.active.points):
-                p = preview.active.points
+                p = preview.active.display_points()
                 hdr = Header(stamp=rospy.Time(last_capture//10**9, last_capture%10**9), frame_id=store.frame)
                 target.publish(PointCloud2(header=hdr, height=1, width=len(p), fields=fields,
                                    is_bigendian=False, point_step=16, row_step=16*len(p),
                                    data=p.astype('<f4',copy=False).tobytes(), is_dense=True))
                 dirty,last_pub = False,now
                 rospy.loginfo_throttle(
-                    12, "Dense: %d scans saved, %d displayed, %d unmatched/queue losses; latest registered scan: %d finite points",
-                    count, len(p), dropped, last_scan_points,
+                    12, "Dense: %d scans saved, %d displayed, %d unmatched/queue losses; latest registered scan: %d finite points, display voxel %.1f mm",
+                    count, len(p), dropped, last_scan_points, 1000. * (preview.fine_voxel or voxel),
                 )
             elif not count and recent is not None and recent.header.stamp != fallback_stamp and now-last_pub >= period:
                 target.publish(recent)
