@@ -9,6 +9,38 @@ image=go2-ros2-sdk:edu
 [[ -r $here/check_native.py ]] || { echo '缺少 check_native.py' >&2; exit 1; }
 command -v docker >/dev/null || { echo '未找到原系统的 Docker。未改用宿主机 Foxy。' >&2; exit 1; }
 sudo -v
+echo '=== 本机网卡和地址（不修改） ==='
+ip -br addr || true
+ip -4 route show || true
+echo '=== 原系统 DDS 网络配置（不修改） ==='
+/usr/bin/python3 - "$dds_file" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+network_tags = {'Domain', 'NetworkInterfaceAddress', 'NetworkInterface',
+                'AllowMulticast', 'Peer', 'ParticipantIndex', 'ExternalNetworkAddress',
+                'EnableMulticastLoopback', 'Transport', 'MaxAutoParticipantIndex'}
+for item in root.iter():
+    tag = item.tag.rsplit('}', 1)[-1]
+    if tag in network_tags:
+        print(tag, dict(item.attrib), (item.text or '').strip())
+PY
+echo '=== 正在运行的容器 ==='
+sudo docker ps --format '{{.Names}} | {{.Image}} | {{.Status}}'
+if sudo docker inspect go2-sdk >/dev/null 2>&1; then
+    sudo docker inspect go2-sdk | /usr/bin/python3 -c '
+import json, sys
+c = json.load(sys.stdin)[0]
+print("go2-sdk:", c["State"]["Status"], "network=" + c["HostConfig"]["NetworkMode"])
+allowed = {"ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "CYCLONEDDS_URI", "ROS_LOCALHOST_ONLY"}
+for value in c["Config"].get("Env", []):
+    if value.split("=", 1)[0] in allowed:
+        print(value)
+for mount in c.get("Mounts", []):
+    if "cyclonedds" in mount.get("Destination", "").lower():
+        print("DDS mount:", mount.get("Source"), "->", mount.get("Destination"))
+'
+fi
 if ! sudo docker image inspect "$image" >/dev/null 2>&1; then
     echo "未找到原系统本地镜像 $image。没有下载镜像或启动其他节点。" >&2
     echo '可用镜像：' >&2
