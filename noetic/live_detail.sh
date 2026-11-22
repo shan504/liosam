@@ -14,11 +14,11 @@ for setup in /opt/ros/noetic/setup.bash "$HOME/mid360s_nk_noetic_ws/devel/setup.
 done
 export ROS_MASTER_URI=http://127.0.0.1:11321 ROS_IP=127.0.0.1
 unset ROS_HOSTNAME
-if [[ ${1:-} == --check-returns ]]; then
-    [[ -r $here/check_returns.py ]] || { echo "缺少 $here/check_returns.py" >&2; exit 1; }
-    shift
-    exec /usr/bin/python3 -u "$here/check_returns.py" "$@"
-fi
+case ${1:-} in
+    --check-still) shift; exec /usr/bin/python3 -u "$here/check_alignment.py" "$@" ;;
+    --check-returns) shift; exec /usr/bin/python3 -u "$here/check_returns.py" "$@" ;;
+    --capture-still) shift; exec /usr/bin/python3 -u "$here/capture_still.py" "$@" ;;
+esac
 [[ -r $here/local_detail.py ]] || { echo "缺少 $here/local_detail.py" >&2; exit 1; }
 mkdir -p "$HOME/.ros"
 exec 8>"$HOME/.ros/go2_detail_11321.lock"
@@ -84,7 +84,7 @@ if sys.argv[3] == "--check":
     print(state)
     sys.exit(0)
 if sys.argv[3]:
-    sys.exit("用法：bash live_detail.sh 或 bash live_detail.sh --check-returns")
+    sys.exit("用法：bash live_detail.sh [--check-still | --capture-still | --check-returns]")
 if state == "reuse":
     print("已复用 ROS master 11321 上的 go2_detail_local，当前轮几何细节输出已注册。")
     sys.exit(0)
