@@ -2,35 +2,50 @@
 # Start the proven Noetic MID360s mapping commands in one supervised terminal.
 set -eo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+case "${1:-}" in
+    --native) mode=native ;;
+    '') mode=lio ;;
+    *) echo 'Usage: start.sh [--native]' >&2; exit 2 ;;
+esac
 if [[ ${GO2_START_CLEAN_ENV:-} != 1 ]]; then
     exec env -i HOME="$HOME" USER="${USER:-$(id -un)}" TERM="${TERM:-xterm}" \
         LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        GO2_NATIVE_SOURCE="${GO2_NATIVE_SOURCE:-auto}" GO2_DDS_FILE="${GO2_DDS_FILE:-}" \
+        GO2_BODY_FROM_LIDAR="${GO2_BODY_FROM_LIDAR:-}" \
         OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 GO2_START_CLEAN_ENV=1 \
         /bin/bash "$here/start.sh" "$@"
 fi
 
-for setup in /opt/ros/noetic/setup.bash "$HOME/mid360s_nk_noetic_ws/devel/setup.bash" \
-             "$HOME/mid360s_imu_noetic_ws/devel/setup.bash"; do
+setups=(/opt/ros/noetic/setup.bash "$HOME/mid360s_nk_noetic_ws/devel/setup.bash")
+if [[ $mode == lio ]]; then setups+=("$HOME/mid360s_imu_noetic_ws/devel/setup.bash"); fi
+for setup in "${setups[@]}"; do
     [[ -r $setup ]] || { echo "缺少 Noetic 环境：$setup" >&2; exit 1; }
     source "$setup" --extend
 done
 export ROS_MASTER_URI=http://127.0.0.1:11321 ROS_IP=127.0.0.1
 unset ROS_HOSTNAME
-for file in "$here/dense_map.py" "$here/live_detail.sh" "$here/local_detail.py" "$here/motion_watch.py" "$here/model_tf.py" "$HOME/go2_farm_ground/start_ground.sh" \
-            "$HOME/go2_model_live.pyz"; do
-    [[ -r $file ]] || { echo "缺少已验证的显示文件：$file" >&2; exit 1; }
+files=("$HOME/go2_model_live.pyz" "$here/dense_map.py" "$here/bridge_topics.json" "$here/foxglove_endpoint.py")
+if [[ $mode == native ]]; then
+    files+=("$here/native_odom.sh" "$here/native_odom.py" "$here/native_sensor_clock.py"
+            "$here/native_model.py" "$here/native_cloud.py" "$here/native_mount.py" "$here/native_inspect_tf.py" "$here/check_returns.py")
+else
+    files+=("$here/live_detail.sh" "$here/local_detail.py" "$here/motion_watch.py" "$here/model_tf.py"
+            "$HOME/go2_farm_ground/start_ground.sh")
+    lio_share=$(rospack find lio_sam)
+    files+=("$lio_share/config/paramsLivoxIMU.yaml")
+fi
+for file in "${files[@]}"; do
+    [[ -r $file ]] || { echo "缺少启动文件：$file" >&2; exit 1; }
 done
-lio_share=$(rospack find lio_sam)
 livox_share=$(rospack find livox_ros_driver2)
-[[ -r $lio_share/config/paramsLivoxIMU.yaml ]] || {
-    echo "缺少 $lio_share/config/paramsLivoxIMU.yaml" >&2; exit 1;
-}
 mkdir -p "$HOME/.ros"
 exec 9>"$HOME/.ros/go2_one_command_start.lock"
 flock -n 9 || { echo '本启动脚本已经运行，请查看原启动窗口。' >&2; exit 1; }
 
 expected_nodes=$(roslaunch --nodes livox_ros_driver2 msg_MID360s.launch)
-expected_nodes+=$'\n'$(roslaunch --nodes lio_sam module_loam.launch)
+if [[ $mode == lio ]]; then
+    expected_nodes+=$'\n'$(roslaunch --nodes lio_sam module_loam.launch)
+fi
 state=$(/usr/bin/python3 - "$expected_nodes" "$livox_share/config/MID360s_config.json" <<'PY'
 from ipaddress import IPv4Address
 import json
@@ -73,10 +88,12 @@ if graph is not None:
     expected = set(sys.argv[1].split()) | {
         "/mid360s_imu_units", "/mid360s_attitude", "/go2_l1_style_dense",
         "/go2_ground_view", "/go2_live_model_view", "/go2_visual_model",
+        "/go2_native_odom_bridge", "/go2_native_cloud", "/go2_native_model",
     }
     topics = {
         "/livox/lidar", "/livox/imu", "/mid360s/imu_si", "/mid360s/imu_filtered",
         "/lio_sam/mapping/odometry", "/lio_sam/mapping/cloud_registered_raw",
+        "/go2_native/odometry", "/go2_native/registered_scan",
         "/go2_visual/dense_map", "/go2_visual/ground/dense_map",
         "/go2_visual/ground/scan", "/go2_visual/live/model_mesh",
     }
@@ -163,13 +180,22 @@ start() {
     local name=$1
     shift
     echo "启动 $name，日志 $run_dir/$name.log"
-    setsid "$@" >"$run_dir/$name.log" 2>&1 &
-    child_pid=$!
+    if [[ $name == B_native ]]; then
+        # Give this child a process group but retain the terminal's sudo ticket.
+        set -m
+        "$@" >"$run_dir/$name.log" 2>&1 &
+        child_pid=$!
+        set +m
+    else
+        setsid "$@" >"$run_dir/$name.log" 2>&1 &
+        child_pid=$!
+    fi
     pids+=("$child_pid")
     names+=("$name")
 }
 shutdown() {
     local code=$? pid step active
+    if [[ -n ${status_tail:-} ]]; then kill "$status_tail" 2>/dev/null || true; fi
     trap - EXIT INT TERM HUP
     echo "正在停止本次建图并关闭点云归档……"
     for pid in "${pids[@]}"; do
@@ -280,6 +306,49 @@ if [[ $master_state == reuse ]] && [[ $(rosparam get /use_sim_time 2>/dev/null |
     echo '现有 ROS master 使用仿真时钟。请在原会话结束后重新启动实机建图。' >&2
     exit 1
 fi
+if [[ $bridge_state == start ]]; then
+    bridge_args=(port:=8766)
+    display_topics=$(/usr/bin/python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$here/bridge_topics.json")
+    if [[ $mode == native ]]; then
+        # Only expose final display clouds; the internal registered scan duplicates the right pane.
+        display_topics=$(/usr/bin/python3 -c 'import json,sys; print(json.dumps(["^(?!/go2_native/(?:registered_scan|path|lidar_pose|mount_dds|mount_ros1_11311)$)" + v.lstrip("^") for v in json.loads(sys.argv[1])]))' "$display_topics")
+    fi
+    for option in "topic_whitelist:=$display_topics" \
+                  send_buffer_limit:=25165824; do
+        if roslaunch -p 11321 --dump-params foxglove_bridge foxglove_bridge.launch \
+                "${bridge_args[@]}" "$option" >"$run_dir/D_bridge_params.yaml" 2>"$run_dir/D_bridge_options.log"; then
+            bridge_args+=("$option")
+        else
+            echo "当前 bridge launch 未接受 $option，请查看 $run_dir/D_bridge_options.log。" >&2
+            exit 1
+        fi
+    done
+    start D_bridge roslaunch -p 11321 foxglove_bridge foxglove_bridge.launch "${bridge_args[@]}"
+else
+    echo '复用现有 Foxglove bridge 8766。'
+fi
+/usr/bin/python3 "$here/foxglove_endpoint.py" || { tail -n 12 "$run_dir/D_bridge.log" 2>/dev/null || true; exit 1; }
+if [[ $mode == native ]]; then
+    if [[ ${GO2_NATIVE_SOURCE:-auto} != ros1 ]] && command -v docker >/dev/null && ! docker info >/dev/null 2>&1; then
+        if ! sudo -v; then
+            if [[ ${GO2_NATIVE_SOURCE:-auto} == ros2 ]]; then exit 1; fi
+            echo "无法获得 Docker 权限，继续等待 ROS1 本体来源。" >&2
+        fi
+    fi
+    start B_native /bin/bash "$here/native_odom.sh"
+    start G_model /usr/bin/python3 -u "$here/native_model.py"
+    start A_lidar roslaunch -p 11321 livox_ros_driver2 msg_MID360s.launch
+    start C_native_cloud /usr/bin/python3 -u "$here/native_cloud.py"
+    start F_dense /usr/bin/python3 -u "$here/dense_map.py" \
+        /lio_sam/mapping/cloud_registered_raw:=/go2_native/registered_scan \
+        /lio_sam/mapping/path:=/go2_native/path "_archive_dir:=$run_dir/dense" \
+        _voxel:=0.015 _fine_voxel:=0.0075 _max_points:=450000 _scan_period:=0.09 _period:=3.5
+    echo '原生里程计模式。请在平地站稳后开始。模型等 Go2 本体位姿，点云等机身到雷达的标定和同时段的位姿。'
+    # Follow by descriptor; each child owns its log for this run.
+    tail -n +1 -q -f "$run_dir"/{B_native,C_native_cloud,G_model,F_dense}.log &
+    status_tail=$!
+    while :; do sleep 2; check_alive; done
+fi
 start A_lidar roslaunch -p 11321 livox_ros_driver2 msg_MID360s.launch
 wait_topic /livox/lidar/point_num
 wait_topic /livox/imu/header
@@ -322,23 +391,6 @@ rosparam set /lio_sam/savePCD false
 start C_mapping roslaunch -p 11321 lio_sam module_loam.launch
 wait_topic /lio_sam/mapping/odometry/header
 
-if [[ $bridge_state == start ]]; then
-    bridge_args=(port:=8766)
-    display_topics=$(/usr/bin/python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$here/bridge_topics.json")
-    for option in "topic_whitelist:=$display_topics" \
-                  send_buffer_limit:=25165824; do
-        if roslaunch -p 11321 --dump-params foxglove_bridge foxglove_bridge.launch \
-                "${bridge_args[@]}" "$option" >"$run_dir/D_bridge_params.yaml" 2>"$run_dir/D_bridge_options.log"; then
-            bridge_args+=("$option")
-        else
-            echo "当前 bridge launch 未接受 $option，请查看 $run_dir/D_bridge_options.log。" >&2
-            exit 1
-        fi
-    done
-    start D_bridge roslaunch -p 11321 foxglove_bridge foxglove_bridge.launch "${bridge_args[@]}"
-else
-    echo '复用现有 Foxglove bridge 8766。'
-fi
 start E_ground /bin/bash "$HOME/go2_farm_ground/start_ground.sh" --height 0.50
 start F_dense /usr/bin/python3 -u "$here/dense_map.py" \
     "_archive_dir:=$run_dir/dense" _voxel:=0.015 _fine_voxel:=0.0075 _max_points:=450000 _scan_period:=0.09 _period:=3.5
