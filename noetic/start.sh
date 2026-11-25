@@ -3,32 +3,41 @@
 set -eo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 case "${1:-}" in
+    --go2) mode=go2 ;;
+    --check-stop) mode=check ;;
     --native) mode=native ;;
     '') mode=lio ;;
-    *) echo 'Usage: start.sh [--native]' >&2; exit 2 ;;
+    *) echo 'Usage: start.sh [--go2 | --native | --check-stop]' >&2; exit 2 ;;
 esac
 if [[ ${GO2_START_CLEAN_ENV:-} != 1 ]]; then
     exec env -i HOME="$HOME" USER="${USER:-$(id -un)}" TERM="${TERM:-xterm}" \
         LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         GO2_NATIVE_SOURCE="${GO2_NATIVE_SOURCE:-auto}" GO2_DDS_FILE="${GO2_DDS_FILE:-}" \
-        GO2_BODY_FROM_LIDAR="${GO2_BODY_FROM_LIDAR:-}" \
+        GO2_ROBOT_URDF="${GO2_ROBOT_URDF:-}" GO2_BODY_FROM_LIDAR="${GO2_BODY_FROM_LIDAR:-}" \
         OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 GO2_START_CLEAN_ENV=1 \
         /bin/bash "$here/start.sh" "$@"
 fi
 
 setups=(/opt/ros/noetic/setup.bash "$HOME/mid360s_nk_noetic_ws/devel/setup.bash")
-if [[ $mode == lio ]]; then setups+=("$HOME/mid360s_imu_noetic_ws/devel/setup.bash"); fi
+if [[ $mode == lio || $mode == go2 ]]; then setups+=("$HOME/mid360s_imu_noetic_ws/devel/setup.bash"); fi
 for setup in "${setups[@]}"; do
     [[ -r $setup ]] || { echo "缺少 Noetic 环境：$setup" >&2; exit 1; }
     source "$setup" --extend
 done
 export ROS_MASTER_URI=http://127.0.0.1:11321 ROS_IP=127.0.0.1
 unset ROS_HOSTNAME
+if [[ $mode == check ]]; then
+    exec /usr/bin/python3 -u "$here/check_stop.py"
+fi
 files=("$HOME/go2_model_live.pyz" "$here/dense_map.py" "$here/bridge_topics.json" "$here/foxglove_endpoint.py")
-if [[ $mode == native ]]; then
+if [[ $mode == native || $mode == go2 ]]; then
     files+=("$here/native_odom.sh" "$here/native_odom.py" "$here/native_sensor_clock.py"
             "$here/native_model.py" "$here/native_cloud.py" "$here/native_mount.py" "$here/native_inspect_tf.py" "$here/check_returns.py")
-else
+fi
+if [[ $mode == go2 ]]; then
+    files+=("$here/native_lio_seed.py" "$here/go2_lio_nodes.launch" "$here/d435_camera.py" "$here/mount_setup.py" "$here/lio_alignment.py")
+fi
+if [[ $mode != native ]]; then
     files+=("$here/live_detail.sh" "$here/local_detail.py" "$here/motion_watch.py" "$here/model_tf.py"
             "$HOME/go2_farm_ground/start_ground.sh")
     lio_share=$(rospack find lio_sam)
@@ -43,7 +52,7 @@ exec 9>"$HOME/.ros/go2_one_command_start.lock"
 flock -n 9 || { echo '本启动脚本已经运行，请查看原启动窗口。' >&2; exit 1; }
 
 expected_nodes=$(roslaunch --nodes livox_ros_driver2 msg_MID360s.launch)
-if [[ $mode == lio ]]; then
+if [[ $mode != native ]]; then
     expected_nodes+=$'\n'$(roslaunch --nodes lio_sam module_loam.launch)
 fi
 state=$(/usr/bin/python3 - "$expected_nodes" "$livox_share/config/MID360s_config.json" <<'PY'
@@ -89,6 +98,7 @@ if graph is not None:
         "/mid360s_imu_units", "/mid360s_attitude", "/go2_l1_style_dense",
         "/go2_ground_view", "/go2_live_model_view", "/go2_visual_model",
         "/go2_native_odom_bridge", "/go2_native_cloud", "/go2_native_model",
+        "/go2_native_lio_seed", "/go2_d435_display",
     }
     topics = {
         "/livox/lidar", "/livox/imu", "/mid360s/imu_si", "/mid360s/imu_filtered",
@@ -237,6 +247,7 @@ shutdown() {
         kill -KILL -- "-$master_pid" 2>/dev/null || true
         wait "$master_pid" 2>/dev/null || true
     fi
+    if [[ -n ${camera_tmp:-} ]]; then rm -rf -- "$camera_tmp"; fi
     echo "本次数据保留在 $run_dir"
     exit "$code"
 }
@@ -248,7 +259,7 @@ check_alive() {
     local i
     for i in "${!pids[@]}"; do
         if ! kill -0 "${pids[i]}" 2>/dev/null; then
-            if [[ ${names[i]} == H_detail || ${names[i]} == I_motion ]]; then
+            if [[ ${names[i]} == H_detail || ${names[i]} == I_motion || ${names[i]} == J_camera ]]; then
                 echo "${names[i]} 辅助进程已退出；建图继续运行，请查看其日志。" >&2
                 tail -n 12 "$run_dir/${names[i]}.log" >&2
                 wait "${pids[i]}" 2>/dev/null || true
@@ -309,7 +320,11 @@ fi
 if [[ $bridge_state == start ]]; then
     bridge_args=(port:=8766)
     display_topics=$(/usr/bin/python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$here/bridge_topics.json")
-    if [[ $mode == native ]]; then
+    if [[ $mode == go2 ]]; then
+        # Exclude internal feature packets, full-rate native poses and raw camera feeds.
+        # The display uses the optimized ground clouds, model TF and one JPEG stream.
+        display_topics='["^/(?:tf|tf_static|camera/image/compressed|go2_visual/(?:ground/(?:scan|dense_map|reference)|live/(?:model_mesh|surface)|detail/local)|localization/(?:valid|status)|operator/status|control/enable|navigation/cancel)$"]'
+    elif [[ $mode == native ]]; then
         # Only expose final display clouds; the internal registered scan duplicates the right pane.
         display_topics=$(/usr/bin/python3 -c 'import json,sys; print(json.dumps(["^(?!/go2_native/(?:registered_scan|path|lidar_pose|mount_dds|mount_ros1_11311)$)" + v.lstrip("^") for v in json.loads(sys.argv[1])]))' "$display_topics")
     fi
@@ -328,7 +343,11 @@ else
     echo '复用现有 Foxglove bridge 8766。'
 fi
 /usr/bin/python3 "$here/foxglove_endpoint.py" || { tail -n 12 "$run_dir/D_bridge.log" 2>/dev/null || true; exit 1; }
-if [[ $mode == native ]]; then
+if [[ $mode == go2 ]]; then
+    camera_tmp=$(mktemp -d /dev/shm/go2_d435_XXXXXX)
+    export GO2_CAMERA_DIR="$camera_tmp"
+fi
+if [[ $mode == native || $mode == go2 ]]; then
     if [[ ${GO2_NATIVE_SOURCE:-auto} != ros1 ]] && command -v docker >/dev/null && ! docker info >/dev/null 2>&1; then
         if ! sudo -v; then
             if [[ ${GO2_NATIVE_SOURCE:-auto} == ros2 ]]; then exit 1; fi
@@ -336,6 +355,8 @@ if [[ $mode == native ]]; then
         fi
     fi
     start B_native /bin/bash "$here/native_odom.sh"
+fi
+if [[ $mode == native ]]; then
     start G_model /usr/bin/python3 -u "$here/native_model.py"
     start A_lidar roslaunch -p 11321 livox_ros_driver2 msg_MID360s.launch
     start C_native_cloud /usr/bin/python3 -u "$here/native_cloud.py"
@@ -348,6 +369,12 @@ if [[ $mode == native ]]; then
     tail -n +1 -q -f "$run_dir"/{B_native,C_native_cloud,G_model,F_dense}.log &
     status_tail=$!
     while :; do sleep 2; check_alive; done
+fi
+if [[ $mode == go2 ]]; then
+    start J_camera /usr/bin/python3 -u "$here/d435_camera.py"
+    start C_native_seed /usr/bin/python3 -u "$here/native_lio_seed.py"
+    tail -n +1 -q -f "$run_dir"/{B_native,C_native_seed,J_camera}.log &
+    status_tail=$!
 fi
 start A_lidar roslaunch -p 11321 livox_ros_driver2 msg_MID360s.launch
 wait_topic /livox/lidar/point_num
@@ -388,15 +415,27 @@ rosparam set /lio_sam/imuRPYWeight 0.0
 rosparam set /lio_sam/extrinsicRPY '[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]'
 rosparam set /lio_sam/useImuHeadingInitialization false
 rosparam set /lio_sam/savePCD false
-start C_mapping roslaunch -p 11321 lio_sam module_loam.launch
+if [[ $mode == go2 ]]; then
+    rosparam set /lio_sam/odomTopic /go2_lio/unused_projection_odom
+    rosparam set /lio_sam/loopClosureEnableFlag true
+    rosparam set /lio_sam/useImuHeadingInitialization true
+    echo 'Go2 本体里程计提供运动初值；MID-360S IMU 用于扫描去畸变；LIO-SAM 执行配准和回环。'
+    start C_mapping roslaunch -p 11321 "$here/go2_lio_nodes.launch"
+else
+    start C_mapping roslaunch -p 11321 lio_sam module_loam.launch
+fi
 wait_topic /lio_sam/mapping/odometry/header
 
 start E_ground /bin/bash "$HOME/go2_farm_ground/start_ground.sh" --height 0.50
 start F_dense /usr/bin/python3 -u "$here/dense_map.py" \
     "_archive_dir:=$run_dir/dense" _voxel:=0.015 _fine_voxel:=0.0075 _max_points:=450000 _scan_period:=0.09 _period:=3.5
-start G_model /usr/bin/python3 -u "$here/model_tf.py"
+if [[ $mode == go2 ]]; then
+    start G_model /usr/bin/python3 -u "$here/native_model.py" _lio_map:=true
+else
+    start G_model /usr/bin/python3 -u "$here/model_tf.py"
+fi
 start H_detail /bin/bash "$here/live_detail.sh"
-start I_motion /usr/bin/python3 -u "$here/motion_watch.py"
+if [[ $mode == lio ]]; then start I_motion /usr/bin/python3 -u "$here/motion_watch.py"; fi
 echo "已启动。保持机器狗在平整地面静止，等待本窗口提示“地面已锁定”。"
 echo 'Foxglove 连接端口 8766。保留本窗口，Ctrl+C 停止本次进程并保留归档。'
 while :; do sleep 2; check_alive; show_progress; done

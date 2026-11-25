@@ -36,7 +36,11 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
-"${docker_cmd[@]}" run --rm --init --network host --cidfile "$work/id" \
+camera_args=()
+if [[ -n ${GO2_CAMERA_DIR:-} ]]; then
+    camera_args=(-v "$GO2_CAMERA_DIR:/run/go2_camera:rw" -v "$here/d435_camera.py:/opt/d435_camera.py:ro")
+fi
+"${docker_cmd[@]}" run "${camera_args[@]}" --rm --init --network host --cidfile "$work/id" \
     -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
     -e CYCLONEDDS_URI=file:///etc/cyclonedds.xml -e ROS_LOCALHOST_ONLY=0 \
     -v "$work:/run/go2_native:ro" \
@@ -44,5 +48,6 @@ trap 'exit 143' TERM HUP
     -v "$here/native_mount.py:/opt/native_mount.py:ro" \
     -v "$here/native_odom.py:/opt/native_odom.py:ro" \
     --entrypoint /bin/bash go2-3d:edu -c \
-    'set -e; source /opt/ros/humble/setup.bash; source /ros2_ws/install/setup.bash; exec /usr/bin/python3 -u /opt/native_odom.py dds' >"$work/odom" &
+    'set -e; source /opt/ros/humble/setup.bash; source /ros2_ws/install/setup.bash; if [[ -d /run/go2_camera ]]; then /usr/bin/python3 -u /opt/d435_camera.py ros2 /run/go2_camera/dds >&2 & fi
+    exec /usr/bin/python3 -u /opt/native_odom.py dds' >"$work/odom" &
 /usr/bin/python3 -u "$here/native_odom.py" "$consumer" <"$work/odom"

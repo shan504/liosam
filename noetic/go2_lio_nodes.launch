@@ -1,0 +1,7 @@
+<launch>
+  <node pkg="lio_sam" type="lio_sam_imageProjection" name="lio_sam_imageProjection" output="screen" required="true"/>
+  <node pkg="lio_sam" type="lio_sam_featureExtraction" name="lio_sam_featureExtraction" output="screen" required="true">
+    <remap from="/lio_sam/feature/cloud_info" to="/go2_lio/unseeded_features"/>
+  </node>
+  <node pkg="lio_sam" type="lio_sam_mapOptmization" name="lio_sam_mapOptmization" output="screen" required="true"/>
+</launch>

@@ -38,6 +38,11 @@ def main():
     from surface import FloorSurface
 
     rospy.init_node("go2_native_model")
+    lio_map = rospy.get_param("~lio_map", False)
+    if lio_map:
+        from lio_alignment import Alignment, WORLD, compose, subscribe
+        align = Alignment()
+        align_subs = subscribe(align)
     with zipfile.ZipFile(archive_path) as archive:
         with np.load(io.BytesIO(archive.read("standing.npz")), allow_pickle=False) as data:
             vertices = data["triangles"].reshape(-1, 3)
@@ -86,18 +91,32 @@ def main():
         with lock:
             if last_stamp is not None and stamp <= last_stamp:
                 return
-            if origin is None:
-                origin = startup_floor(position, quat, vertices)
-                static_tf.sendTransform(transform(NATIVE_WORLD, GROUND, stamp, origin, (0, 0, 0, 1)))
-                rospy.loginfo("以首帧 Go2 原生位姿和站姿模型脚底建立地面参考系")
-            xyz = position - origin
-            body = transform(GROUND, BODY, stamp, xyz, quat)
-            focus = transform(GROUND, FOCUS, stamp, (xyz[0], xyz[1], 0), (0, 0, 0, 1))
-            tf.sendTransform([body, focus])
+            if lio_map:
+                map_from_native = align.value()
+                if map_from_native is None:
+                    rospy.logwarn_throttle(5, "模型等待本体雷达位姿与 LIO 建图同戳对齐")
+                    return
+                link = transform(WORLD, NATIVE_WORLD, stamp, *map_from_native)
+                body = transform(NATIVE_WORLD, BODY, stamp, position, quat)
+                tf.sendTransform([link, body])
+                xyz, orientation = compose(map_from_native, (tuple(position), tuple(quat)))
+                parent = WORLD
+            else:
+                if origin is None:
+                    origin = startup_floor(position, quat, vertices)
+                    static_tf.sendTransform(transform(NATIVE_WORLD, GROUND, stamp, origin, (0, 0, 0, 1)))
+                    rospy.loginfo("以首帧 Go2 原生位姿和站姿模型脚底建立地面参考系")
+                xyz = position - origin
+                body = transform(GROUND, BODY, stamp, xyz, quat)
+                focus = transform(GROUND, FOCUS, stamp, (xyz[0], xyz[1], 0), (0, 0, 0, 1))
+                tf.sendTransform([body, focus])
+                orientation = quat
+                parent = GROUND
             actual = PoseStamped()
-            actual.header = body.header
+            actual.header.frame_id, actual.header.stamp = parent, stamp
             actual.pose.position.x, actual.pose.position.y, actual.pose.position.z = map(float, xyz)
-            actual.pose.orientation = body.transform.rotation
+            q_out = actual.pose.orientation
+            q_out.x, q_out.y, q_out.z, q_out.w = map(float, orientation)
             pose_pub.publish(actual)
             last_rx, last_stamp = time.monotonic(), stamp
             if not visible:
@@ -113,7 +132,7 @@ def main():
                 model_pub.publish(remove)
                 visible = False
                 rospy.logwarn("Go2 原生位姿超过两秒未更新，已隐藏模型")
-            floor_ready = origin is not None
+            floor_ready = lio_map or origin is not None
         if floor_ready:
             surface.tick()
         rate.sleep()
