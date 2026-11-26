@@ -45,6 +45,7 @@ fi
     -e CYCLONEDDS_URI=file:///etc/cyclonedds.xml -e ROS_LOCALHOST_ONLY=0 \
     -v "$work:/run/go2_native:ro" \
     -v "$dds_file:/etc/cyclonedds.xml:ro" \
+    -v "$here/status_input.py:/opt/status_input.py:ro" \
     -v "$here/native_mount.py:/opt/native_mount.py:ro" \
     -v "$here/native_odom.py:/opt/native_odom.py:ro" \
     --entrypoint /bin/bash go2-3d:edu -c \

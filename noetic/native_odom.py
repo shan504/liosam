@@ -78,6 +78,11 @@ def read_dds():
     except ImportError as error:
         node.get_logger().warning('无法读取 DDS 静态外参: %s' % error)
     try:
+        from status_input import subscribe_dds
+        subscribe_dds(node, lambda line: print(line, flush=True))
+    except Exception as exc:
+        node.get_logger().warning('DDS 状态显示不可用: %s' % exc)
+    try:
         # The host owns this lease. A stopped supervisor can revoke it even
         # after its sudo credential has expired or the input is silent.
         while rclpy.ok() and Path('/run/go2_native/running').exists():
@@ -118,9 +123,12 @@ def read_original_ros1():
         return
     static_edges = {}
     write_lock = Lock()
-    def send(sample):
+    def write_line(line):
         with write_lock:
-            print(WIRE + json.dumps(sample, separators=(',', ':')), flush=True)
+            print(line, flush=True)
+
+    def send(sample):
+        write_line(WIRE + json.dumps(sample, separators=(',', ':')))
     def receive_static(msg):
         with write_lock:
             line = wire_statics(msg, 'ros1_11311', static_edges)
@@ -128,6 +136,11 @@ def read_original_ros1():
                 print(line, flush=True)
     subs = subscribe_native_ros1(rospy, Odometry, 'ROS1:11311', send)
     subs.append(rospy.Subscriber('/tf_static', TFMessage, receive_static, queue_size=16))
+    try:
+        from status_input import subscribe_original
+        subs.extend(subscribe_original(rospy, write_line))
+    except Exception as exc:
+        rospy.logwarn('11311 状态显示不可用: %s', exc)
     rospy.spin()
 
 
@@ -192,6 +205,8 @@ def publish_ros1(mode):
             pub.publish(m)
 
     from native_mount import PREFIX as MOUNT_LINE, relay as relay_mount
+    from status_input import PREFIX as STATUS_LINE, host_relay
+    relay_status = host_relay(rospy)
     mount_publishers = {}
     def pipe_reader(stream, label):
         try:
@@ -200,6 +215,11 @@ def publish_ros1(mode):
                     return
                 if line.startswith(MOUNT_LINE):
                     relay_mount(line, mount_publishers)
+                elif line.startswith(STATUS_LINE):
+                    try:
+                        relay_status(line[len(STATUS_LINE):].rstrip('\n'))
+                    except Exception as exc:
+                        rospy.logwarn_throttle(10., '状态消息未转发: %s' % exc)
                 elif line.startswith(WIRE):
                     convert(json.loads(line[len(WIRE):]))
                 else:

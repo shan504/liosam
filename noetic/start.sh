@@ -5,9 +5,10 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 case "${1:-}" in
     --go2) mode=go2 ;;
     --check-stop) mode=check ;;
+    --status) mode=status ;;
     --native) mode=native ;;
     '') mode=lio ;;
-    *) echo 'Usage: start.sh [--go2 | --native | --check-stop]' >&2; exit 2 ;;
+    *) echo 'Usage: start.sh [--go2 | --native | --check-stop | --status]' >&2; exit 2 ;;
 esac
 if [[ ${GO2_START_CLEAN_ENV:-} != 1 ]]; then
     exec env -i HOME="$HOME" USER="${USER:-$(id -un)}" TERM="${TERM:-xterm}" \
@@ -26,6 +27,13 @@ for setup in "${setups[@]}"; do
 done
 export ROS_MASTER_URI=http://127.0.0.1:11321 ROS_IP=127.0.0.1
 unset ROS_HOSTNAME
+if [[ $mode == status ]]; then
+    if ! timeout 3s rosparam get /run_id >/dev/null 2>&1; then
+        echo '请先在另一个终端启动 --go2 建图，再接入状态面板。' >&2
+        exit 1
+    fi
+    exec /usr/bin/python3 -u "$here/mapping_status.py" --attach
+fi
 if [[ $mode == check ]]; then
     exec /usr/bin/python3 -u "$here/check_stop.py"
 fi
@@ -35,7 +43,7 @@ if [[ $mode == native || $mode == go2 ]]; then
             "$here/native_model.py" "$here/native_cloud.py" "$here/native_mount.py" "$here/native_inspect_tf.py" "$here/check_returns.py")
 fi
 if [[ $mode == go2 ]]; then
-    files+=("$here/native_lio_seed.py" "$here/go2_lio_nodes.launch" "$here/d435_camera.py" "$here/mount_setup.py" "$here/lio_alignment.py")
+    files+=("$here/mapping_status.py" "$here/status_input.py" "$here/native_lio_seed.py" "$here/go2_lio_nodes.launch" "$here/d435_camera.py" "$here/mount_setup.py" "$here/lio_alignment.py")
 fi
 if [[ $mode != native ]]; then
     files+=("$here/live_detail.sh" "$here/local_detail.py" "$here/motion_watch.py" "$here/model_tf.py"
@@ -259,7 +267,7 @@ check_alive() {
     local i
     for i in "${!pids[@]}"; do
         if ! kill -0 "${pids[i]}" 2>/dev/null; then
-            if [[ ${names[i]} == H_detail || ${names[i]} == I_motion || ${names[i]} == J_camera ]]; then
+            if [[ ${names[i]} == H_detail || ${names[i]} == I_motion || ${names[i]} == J_camera || ${names[i]} == K_status ]]; then
                 echo "${names[i]} 辅助进程已退出；建图继续运行，请查看其日志。" >&2
                 tail -n 12 "$run_dir/${names[i]}.log" >&2
                 wait "${pids[i]}" 2>/dev/null || true
@@ -371,6 +379,7 @@ if [[ $mode == native ]]; then
     while :; do sleep 2; check_alive; done
 fi
 if [[ $mode == go2 ]]; then
+    start K_status /usr/bin/python3 -u "$here/mapping_status.py"
     start J_camera /usr/bin/python3 -u "$here/d435_camera.py"
     start C_native_seed /usr/bin/python3 -u "$here/native_lio_seed.py"
     tail -n +1 -q -f "$run_dir"/{B_native,C_native_seed,J_camera}.log &
