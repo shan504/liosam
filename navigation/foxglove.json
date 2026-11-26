@@ -1,0 +1,354 @@
+{
+  "configById": {
+    "3D!g2initial": {
+      "followTf": "map",
+      "followMode": "follow-none",
+      "cameraState": {
+        "perspective": true,
+        "distance": 11,
+        "phi": 50,
+        "thetaOffset": 225,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.01,
+        "far": 5000
+      },
+      "scene": {
+        "backgroundColor": "#15191d",
+        "meshUpAxis": "z_up",
+        "transforms": {
+          "showLabel": false,
+          "axisScale": 0.3,
+          "lineWidth": 0
+        }
+      },
+      "transforms": {},
+      "topics": {
+        "/map": {
+          "visible": true,
+          "colorMode": "map",
+          "alpha": 0.65
+        },
+        "/map_cloud": {
+          "visible": true,
+          "pointSize": 1,
+          "colorMode": "colormap",
+          "colorField": "z",
+          "colorMap": "turbo",
+          "decayTime": 0
+        },
+        "/global_costmap/costmap": {
+          "visible": false,
+          "colorMode": "costmap",
+          "alpha": 0.24
+        },
+        "/local_costmap/costmap": {
+          "visible": false,
+          "colorMode": "costmap",
+          "alpha": 0.4
+        },
+        "/plan": {
+          "visible": true
+        },
+        "/local_plan": {
+          "visible": true
+        },
+        "/global_costmap/published_footprint": {
+          "visible": true
+        },
+        "/local_costmap/published_footprint": {
+          "visible": true
+        },
+        "/initialpose": {
+          "visible": true
+        },
+        "/goal_pose": {
+          "visible": false
+        },
+        "/navigation/waypoints": {
+          "visible": true
+        },
+        "/navigation/cloud": {
+          "visible": false,
+          "pointSize": 2,
+          "colorMode": "flat",
+          "flatColor": "#36e5ffff",
+          "decayTime": 0
+        },
+        "/navigation/scan": {
+          "visible": true,
+          "pointSize": 2,
+          "colorMode": "flat",
+          "flatColor": "#36e5ffff",
+          "decayTime": 0
+        }
+      },
+      "layers": {},
+      "imageMode": {},
+      "publish": {
+        "type": "pose_estimate",
+        "poseTopic": "/goal_pose",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "fixedFrame": "map",
+      "foxglovePanelTitle": "GICP 初始位姿"
+    },
+    "3D!g2goal": {
+      "followTf": "map",
+      "followMode": "follow-none",
+      "cameraState": {
+        "perspective": false,
+        "distance": 12,
+        "phi": 0,
+        "thetaOffset": 0,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.01,
+        "far": 5000
+      },
+      "scene": {
+        "backgroundColor": "#15191d",
+        "meshUpAxis": "z_up",
+        "transforms": {
+          "showLabel": false,
+          "axisScale": 0.3,
+          "lineWidth": 0
+        }
+      },
+      "transforms": {},
+      "topics": {
+        "/map": {
+          "visible": true,
+          "colorMode": "map",
+          "alpha": 0.65
+        },
+        "/map_cloud": {
+          "visible": false,
+          "pointSize": 1,
+          "colorMode": "colormap",
+          "colorField": "z",
+          "colorMap": "turbo",
+          "decayTime": 0
+        },
+        "/global_costmap/costmap": {
+          "visible": true,
+          "colorMode": "costmap",
+          "alpha": 0.24
+        },
+        "/local_costmap/costmap": {
+          "visible": true,
+          "colorMode": "costmap",
+          "alpha": 0.4
+        },
+        "/plan": {
+          "visible": true
+        },
+        "/local_plan": {
+          "visible": true
+        },
+        "/global_costmap/published_footprint": {
+          "visible": true
+        },
+        "/local_costmap/published_footprint": {
+          "visible": true
+        },
+        "/initialpose": {
+          "visible": false
+        },
+        "/goal_pose": {
+          "visible": true
+        },
+        "/navigation/waypoints": {
+          "visible": true
+        },
+        "/navigation/cloud": {
+          "visible": false,
+          "pointSize": 2,
+          "colorMode": "flat",
+          "flatColor": "#36e5ffff",
+          "decayTime": 0
+        },
+        "/navigation/scan": {
+          "visible": false,
+          "pointSize": 2,
+          "colorMode": "flat",
+          "flatColor": "#36e5ffff",
+          "decayTime": 0
+        }
+      },
+      "layers": {},
+      "imageMode": {},
+      "publish": {
+        "type": "pose",
+        "poseTopic": "/goal_pose",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "fixedFrame": "map",
+      "foxglovePanelTitle": "多点导航"
+    },
+    "Publish!g2enable": {
+      "topicName": "/control/enable",
+      "datatype": "std_msgs/msg/Bool",
+      "value": "{\"data\":true}",
+      "advancedView": true,
+      "buttonText": "执行航点队列",
+      "buttonTooltip": "定位有效后，执行已选择的航点",
+      "buttonColor": "#227b3a"
+    },
+    "Publish!g2stop": {
+      "topicName": "/control/enable",
+      "datatype": "std_msgs/msg/Bool",
+      "value": "{\"data\":false}",
+      "advancedView": true,
+      "buttonText": "停止运动",
+      "buttonTooltip": "暂停运动并保留航点队列",
+      "buttonColor": "#c52430"
+    },
+    "Publish!g2cancel": {
+      "topicName": "/navigation/cancel",
+      "datatype": "std_msgs/msg/Empty",
+      "value": "{}",
+      "advancedView": true,
+      "buttonText": "取消路线",
+      "buttonTooltip": "取消路线",
+      "buttonColor": "#b76b12"
+    },
+    "RawMessages!g2valid": {
+      "topicPath": "/localization/valid",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false
+    },
+    "RawMessages!g2gicp": {
+      "topicPath": "/localization/status",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false
+    },
+    "RawMessages!g2operator": {
+      "topicPath": "/operator/status",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false
+    },
+    "Publish!g2resume": {
+      "topicName": "/navigation/resume",
+      "datatype": "std_msgs/msg/Empty",
+      "value": "{}",
+      "advancedView": true,
+      "buttonText": "恢复航点队列",
+      "buttonColor": "#326bb7"
+    },
+    "RawMessages!g2control": {
+      "topicPath": "/control/status",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false
+    },
+    "RawMessages!g2ready": {
+      "topicPath": "/navigation/startup_status",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "first": {
+      "first": {
+        "first": "3D!g2initial",
+        "second": "3D!g2goal",
+        "direction": "row",
+        "splitPercentage": 50
+      },
+      "second": {
+        "first": "Publish!g2enable",
+        "second": {
+          "first": "Publish!g2stop",
+          "second": {
+            "first": "Publish!g2cancel",
+            "second": "Publish!g2resume",
+            "direction": "column",
+            "splitPercentage": 50
+          },
+          "direction": "row",
+          "splitPercentage": 55
+        },
+        "direction": "row",
+        "splitPercentage": 30
+      },
+      "direction": "column",
+      "splitPercentage": 80
+    },
+    "second": {
+      "first": {
+        "first": "RawMessages!g2ready",
+        "second": {
+          "first": "RawMessages!g2valid",
+          "second": "RawMessages!g2gicp",
+          "direction": "column",
+          "splitPercentage": 26
+        },
+        "direction": "column",
+        "splitPercentage": 26
+      },
+      "second": {
+        "first": "RawMessages!g2operator",
+        "second": "RawMessages!g2control",
+        "direction": "column",
+        "splitPercentage": 60
+      },
+      "direction": "column",
+      "splitPercentage": 50
+    },
+    "direction": "row",
+    "splitPercentage": 75
+  }
+}
