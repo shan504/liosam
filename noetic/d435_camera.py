@@ -356,10 +356,18 @@ def run(directory):
                 if usb is None or usb.poll() is not None:
                     if usb is not None and have_driver:
                         have_driver = False
-                    cmd = (['roslaunch','-p','11321','realsense2_camera','rs_camera.launch','device_type:=d435i',
-                            'camera:=go2_d435','enable_color:=true','enable_depth:=false','color_width:=640',
-                            'color_height:=480','color_fps:=15'] if have_driver else
-                           [sys.executable, '-u', __file__, 'usb', str(directory/'usb')])
+                    if have_driver:
+                        # The image panel only uses RGB. Installed launch files may enable IR by default.
+                        cmd = [
+                            'roslaunch', '-p', '11321', 'realsense2_camera', 'rs_camera.launch',
+                            'device_type:=d435i', 'camera:=go2_d435',
+                            'enable_color:=true', 'color_width:=640', 'color_height:=480', 'color_fps:=15',
+                            'enable_depth:=false', 'enable_infra:=false', 'enable_infra1:=false',
+                            'enable_infra2:=false', 'enable_confidence:=false', 'enable_fisheye:=false',
+                            'enable_gyro:=false', 'enable_accel:=false',
+                        ]
+                    else:
+                        cmd = [sys.executable, '-u', __file__, 'usb', str(directory/'usb')]
                     rospy.loginfo('等待 D435i 彩色话题，尝试本机 %s', 'RealSense ROS 驱动' if have_driver else 'USB SDK')
                     children[:] = [p for p in children if p.poll() is None]
                     usb = spawn(cmd)
