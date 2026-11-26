@@ -730,6 +730,7 @@
       "layers": {},
       "imageMode": {
         "imageTopic": "/camera/image/compressed",
+        "rotation": 180,
         "synchronize": false
       },
       "publish": {
