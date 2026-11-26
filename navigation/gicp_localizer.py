@@ -9,8 +9,7 @@ import threading
 import time
 
 import numpy as np
-from scipy.spatial import cKDTree
-from scipy.spatial.transform import Rotation
+from prepare_map import quaternion, rigid
 
 LASER_TOPIC = '/navigation/cloud'
 MAX_SCAN_AGE = 1.0
@@ -19,12 +18,11 @@ CONFIRMATIONS = 3
 
 
 def matrix(xyz, xyzw):
-    pose = np.eye(4)
-    pose[:3, :3] = Rotation.from_quat(xyzw).as_matrix()
-    pose[:3, 3] = xyz
-    if not np.isfinite(pose).all():
-        raise ValueError('non-finite pose')
-    return pose
+    q = np.asarray(xyzw, dtype=float)
+    norm = np.linalg.norm(q)
+    if q.shape != (4,) or not np.isfinite(norm) or norm == 0:
+        raise ValueError('invalid pose quaternion')
+    return rigid(xyz, q / norm)
 
 
 def vec(p):
@@ -50,7 +48,8 @@ def yaw(pose):
 
 
 def rotation_z(angle):
-    return Rotation.from_rotvec([0, 0, angle]).as_matrix()
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])
 
 
 def planar(body):
@@ -61,7 +60,8 @@ def planar(body):
 
 
 def difference(a, b):
-    angle = Rotation.from_matrix(a[:3, :3].T @ b[:3, :3]).magnitude()
+    q = quaternion(a[:3, :3].T @ b[:3, :3])
+    angle = 2 * math.atan2(np.linalg.norm(q[:3]), q[3])
     return float(np.linalg.norm(a[:3, 3] - b[:3, 3])), math.degrees(angle)
 
 
@@ -73,8 +73,13 @@ def within(a, b, meters, degrees):
 def blend_at_body(guess, match, weight):
     # Blend around the robot, not around an arbitrary (possibly faraway) native origin.
     result = guess.copy()
-    delta = Rotation.from_matrix(guess[:3, :3].T @ match[:3, :3]).as_rotvec()
-    result[:3, :3] = guess[:3, :3] @ Rotation.from_rotvec(weight * delta).as_matrix()
+    # quaternion() returns w >= 0, giving the shorter arc across the yaw wrap.
+    relative = quaternion(guess[:3, :3].T @ match[:3, :3])
+    sine = np.linalg.norm(relative[:3])
+    if sine > 0.:
+        half_angle = weight * math.atan2(sine, relative[3])
+        step = np.r_[relative[:3] / sine * math.sin(half_angle), math.cos(half_angle)]
+        result[:3, :3] = guess[:3, :3] @ rigid([0., 0., 0.], step)[:3, :3]
     result[:3, 3] += weight * (match[:3, 3] - guess[:3, 3])
     return result
 
@@ -105,11 +110,13 @@ class Matcher:
         import open3d as o3d
         self.o3d = o3d
         self.reg = o3d.pipelines.registration
-        self.prior = np.load(directory / 'target.npy', mmap_mode='r', allow_pickle=False)
-        if (self.prior.ndim != 2 or self.prior.shape[1] != 3 or len(self.prior) < 100
-                or not np.isfinite(self.prior).all()):
+        points = np.load(directory / 'target.npy', mmap_mode='r', allow_pickle=False)
+        if (points.ndim != 2 or points.shape[1] != 3 or len(points) < 100
+                or not np.isfinite(points).all()):
             raise ValueError('target.npy must contain finite map-frame XYZ')
-        self.tree = cKDTree(self.prior)
+        self.prior = o3d.geometry.PointCloud()
+        self.prior.points = o3d.utility.Vector3dVector(np.ascontiguousarray(points, dtype='float64'))
+        self.tree = o3d.geometry.KDTreeFlann(self.prior)
         self.center = None
         self.target = None
 
@@ -120,10 +127,10 @@ class Matcher:
 
     def submap(self, position):
         if self.center is None or np.linalg.norm(self.center - position) > 2.0:
-            rows = self.tree.query_ball_point(position, 18.0)
-            if len(rows) < 100:
+            count, rows, _ = self.tree.search_radius_vector_3d(position, 18.0)
+            if count < 100:
                 raise ValueError('初始位姿附近的地图点不足，请在地图上设置初始位姿')
-            target = self.cloud(self.prior[rows], .12)
+            target = self.cloud(np.asarray(self.prior.points)[np.asarray(rows)], .12)
             target.estimate_normals(self.o3d.geometry.KDTreeSearchParamHybrid(radius=.45, max_nn=24))
             self.target, self.center = target, position.copy()
         return self.target
@@ -223,8 +230,9 @@ def main():
             self.map_subscribers = subscribers
             if not subscribers or (self.map_shown and not joined and time.monotonic()-self.last_map_publish < 15):
                 return
-            step = max(1, math.ceil(len(self.matcher.prior)/160000))
-            points = np.ascontiguousarray(self.matcher.prior[::step], dtype='<f4')
+            map_points = np.asarray(self.matcher.prior.points)
+            step = max(1, math.ceil(len(map_points)/160000))
+            points = np.ascontiguousarray(map_points[::step], dtype='<f4')
             msg = PointCloud2()
             msg.header.frame_id, msg.header.stamp = 'map', self.get_clock().now().to_msg()
             msg.height, msg.width = 1, len(points)
@@ -381,7 +389,7 @@ def main():
                     tf = TransformStamped()
                     tf.header.stamp, tf.header.frame_id, tf.child_frame_id = odom[1], parent, child
                     tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z = map(float, value[:3, 3])
-                    q = Rotation.from_matrix(value[:3, :3]).as_quat()
+                    q = quaternion(value[:3, :3])
                     tf.transform.rotation.x,tf.transform.rotation.y,tf.transform.rotation.z,tf.transform.rotation.w = map(float, q)
                     links.append(tf)
                 self.tf_pub.sendTransform(links)

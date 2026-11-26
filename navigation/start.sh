@@ -36,7 +36,18 @@ prepared=$("${docker_cmd[@]}" run --rm --init --network none --user "$(id -u):$(
         set -e
         source /opt/ros/humble/setup.bash
         source /ros2_ws/install/setup.bash
-        /usr/bin/python3 -c "import open3d, numpy, scipy, yaml, tf2_ros, rclpy; from unitree_api.msg import Request"
+        cd /repo/navigation
+        /usr/bin/python3 - >&2 <<PY_RUNTIME
+import open3d as o3d
+import gicp_localizer
+import mission
+import nav2_ready
+
+o3d.geometry.KDTreeFlann().search_radius_vector_3d
+registration = o3d.pipelines.registration
+registration.registration_generalized_icp
+registration.TransformationEstimationForGeneralizedICP()
+PY_RUNTIME
         for pkg in nav2_map_server nav2_planner nav2_controller nav2_behaviors nav2_velocity_smoother nav2_bt_navigator nav2_lifecycle_manager nav2_rotation_shim_controller foxglove_bridge; do ros2 pkg prefix "$pkg" >/dev/null; done
         exec /usr/bin/python3 -u /repo/navigation/prepare_map.py /map_source /cache')
 [[ $prepared == /cache/* && -s "$cache/${prepared#/cache/}/nav.yaml" ]] || {
