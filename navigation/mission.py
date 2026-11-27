@@ -29,7 +29,7 @@ class Mission(Node):
         self.route = deque()
         self.sequence = self.completed = 0
         self.armed = False
-        self.active = self.handle = None
+        self.active = self.goal_handle = None
         self.goal_sent_at = self.cancel_started = 0.
         self.action_fault = ''
         profile = yaml.safe_load(Path(__file__).with_name('nav2.yaml').read_text())['velocity_smoother']['ros__parameters']
@@ -73,7 +73,7 @@ class Mission(Node):
             return self.action_fault
         if self.void_goal:
             return '等待当前 Nav2 任务结束'
-        if self.handle is not None:
+        if self.goal_handle is not None:
             return '执行中'
         if self.active is not None:
             return '等待 Nav2 接受'
@@ -221,10 +221,10 @@ class Mission(Node):
         self.pause(self.action_fault)
 
     def request_cancel(self, now):
-        if self.handle is not None and now >= self.cancel_next:
+        if self.goal_handle is not None and now >= self.cancel_next:
             self.cancel_next = now + 1.
             try:
-                self.handle.cancel_goal_async()
+                self.goal_handle.cancel_goal_async()
             except Exception as exc:
                 self.get_logger().warning('请求取消 Nav2 任务失败：' + str(exc))
 
@@ -255,7 +255,7 @@ class Mission(Node):
             self.active, self.void_goal = None, False
             self.pause('Nav2 拒绝航点；检查地图、目标及 Nav2 状态后重新启用')
             return
-        self.handle = handle
+        self.goal_handle = handle
         try:
             handle.get_result_async().add_done_callback(self.result)
         except Exception as exc:
@@ -277,7 +277,7 @@ class Mission(Node):
             self.action_fault = ''
             self.reason = 'Nav2 已确认上一个任务结束，可重新启用'
         finished, invalidated = self.active, self.void_goal
-        self.active, self.handle, self.void_goal = None, None, False
+        self.active, self.goal_handle, self.void_goal = None, None, False
         self.stop()
         if not invalidated:
             if status == GoalStatus.STATUS_SUCCEEDED and self.route and self.route[0] is finished:
@@ -295,7 +295,7 @@ class Mission(Node):
 
     def velocity(self, msg):
         now = time.monotonic()
-        if not self.armed or self.handle is None or self.void_goal or self.gate(now):
+        if not self.armed or self.goal_handle is None or self.void_goal or self.gate(now):
             return
         v = [msg.linear.x, msg.linear.y, msg.angular.z]
         if not all(math.isfinite(i) for i in v):
@@ -323,7 +323,7 @@ class Mission(Node):
         now = time.monotonic()
         self.update_graph(now)
         if self.active is not None and not self.action_fault:
-            if self.handle is None and now-self.goal_sent_at > 8.:
+            if self.goal_handle is None and now-self.goal_sent_at > 8.:
                 self.uncertain('Nav2 超时未确认目标是否接受')
             elif self.void_goal and now-self.cancel_started > 8.:
                 self.uncertain('Nav2 超时未确认取消结果')
@@ -339,7 +339,7 @@ class Mission(Node):
                 self.dispatch()
         if self.command is not None:
             stamp, values = self.command
-            if now-stamp > self.velocity_timeout or not self.armed or self.handle is None or not any(values):
+            if now-stamp > self.velocity_timeout or not self.armed or self.goal_handle is None or not any(values):
                 self.stop()
             else:
                 self.request(1008, json.dumps(dict(zip(('x', 'y', 'z'), values))))
