@@ -1,0 +1,1000 @@
+#!/usr/bin/env python3
+"""Odometry-seeded 3D scan-to-map GICP and saved-map localization (ROS2 Humble)."""
+import threading
+import time
+import json
+from dataclasses import fields
+from collections import deque
+from pathlib import Path
+from map_library import map_name
+from map_export import save_snapshot
+import numpy as np
+import open3d as o3d
+import yaml
+import rclpy
+from rclpy.node import Node
+from rclpy.time import Time
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profile_sensor_data
+from std_msgs.msg import Bool, String, Header, Empty
+from std_srvs.srv import Trigger
+from sensor_msgs.msg import PointCloud2
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped
+from tf2_ros import Buffer, TransformListener, TransformBroadcaster, TransformException
+from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
+                      cloud_xyz, filter_points, rotation_angle, ObservedGrid, planar_pose, first_map_pose)
+from registration import cloud, align, static_correction_is_consistent, blend_correction, odometry_is_stationary
+from ros_cloud import xyz_message
+from ground import body_seed_position
+from map_start import start_pose_from_metadata
+from localization_hold import OdometryBudget
+from mapping_store import MappingStore
+from loop_closure import LoopConfig
+from mapping_loop import MappingLoopWorker
+from mapping_rebuild import MappingObservation
+from relocalization import Relocalizer, RecoveryConfig
+from localization_recovery import RecoveryWorker, RecoveryJob
+
+INITIAL_POSE_WAIT_SECONDS = 10.0
+
+
+def transform_matrix(transform):
+    t, q = transform.translation, transform.rotation
+    return pose_matrix([t.x,t.y,t.z], [q.x,q.y,q.z,q.w])
+
+
+class ScanMatchUnavailable(ValueError):
+    """Discard this scan without renewing the previous accepted match."""
+
+
+def require_match(result, prefix=''):
+    if not result.accepted:
+        error = (ScanMatchUnavailable if result.reason in
+                 ('too few points', 'overlap/residual rejected') else ValueError)
+        raise error(f'{prefix}{result.reason}: fitness={result.fitness:.3f} rmse={result.rmse:.3f}')
+
+
+class Mapper(Node):
+    def __init__(self):
+        super().__init__('go2_gicp')
+        defaults = dict(mode='mapping', map_directory='/maps/latest', output_directory='/maps', map_name='default',
+                        voxel_size=0.15, map_voxel_size=0.06, keyframe_max_interval=2.0,
+                        scan_window=0.0, map_publish_period=2.0,
+                        grid_resolution=0.10, floor_z=-0.30,
+                        obstacle_min_height=0.10, obstacle_max_height=1.5,
+                        max_map_points=10000000, submap_radius=25.0,
+                        registration_period=0.5, validity_timeout=1.0,
+                        correspondence_distance=0.7, min_fitness=0.55, max_rmse=0.20,
+                        max_translation=0.6, max_rotation=0.35,
+                        localization_voxel_size=0.10, localization_correspondence=0.70,
+                        localization_max_translation=1.0, localization_max_rotation_degrees=45.0,
+                        localization_min_fitness=0.20, localization_max_rmse=0.20,
+                        stationary_translation_limit=0.35, stationary_rotation_limit_degrees=12.0,
+                        localization_hold_timeout=3.0, localization_hold_distance=1.0,
+                        localization_hold_rotation_degrees=60.0, localization_odom_timeout=0.3,
+                        correction_alpha=0.25,auto_initialize=True,initial_from_map_start=True,
+                        initial_x=0.0,initial_y=0.0,initial_z=0.0,initial_yaw_degrees=0.0)
+        defaults.update(loop_closure_enabled=True, mapping_backend='lidar', map_frame='map')
+        defaults.update(auto_relocalization=True, recovery_period=1.0, recovery_reference_timeout=60.0)
+        recovery_defaults = RecoveryConfig()
+        defaults.update({'recovery_'+field.name: getattr(recovery_defaults, field.name)
+                         for field in fields(recovery_defaults)})
+        loop_defaults = LoopConfig()
+        defaults.update({'loop_'+field.name: getattr(loop_defaults, field.name)
+                         for field in fields(loop_defaults)})
+        for name, value in defaults.items():
+            self.declare_parameter(name, value)
+        self.p = {k: self.get_parameter(k).value for k in defaults}
+        self.external_backend = self.p['mapping_backend'] == 'rtabmap'
+        if self.p['mapping_backend'] not in ('lidar', 'rtabmap'):
+            raise ValueError('mapping_backend must be lidar or rtabmap')
+        if self.external_backend and (self.p['mode'] != 'mapping' or
+                self.p['loop_closure_enabled'] or self.p['map_frame'] != 'gicp_odom'):
+            raise ValueError('RTAB-Map requires mapping mode, gicp_odom frame and old loop closure disabled')
+        if not self.external_backend and self.p['map_frame'] != 'map':
+            raise ValueError('The original mapping/localization path uses map frame')
+        loop_config = LoopConfig(**{field.name: self.p['loop_'+field.name]
+                                    for field in fields(loop_defaults)})
+        self.recovery_config = RecoveryConfig(**{field.name: self.p['recovery_'+field.name]
+                                                for field in fields(recovery_defaults)})
+        if (self.recovery_config.confirmations < 3 or
+                not all(np.isfinite(self.p[name]) and self.p[name] > 0
+                        for name in ('recovery_period', 'recovery_reference_timeout'))):
+            raise ValueError('recovery requires at least three scans and a positive search period')
+        if not 0 < self.p['correction_alpha'] <= 1:
+            raise ValueError('correction_alpha must be greater than 0 and at most 1')
+        if self.p['mode'] not in ('mapping','localization'):
+            raise ValueError('mode must be mapping or localization')
+        for name in ('stationary_translation_limit', 'stationary_rotation_limit_degrees',
+                     'localization_correspondence', 'localization_max_translation',
+                     'localization_max_rotation_degrees', 'validity_timeout',
+                     'localization_hold_timeout', 'localization_hold_distance',
+                     'localization_hold_rotation_degrees', 'localization_odom_timeout'):
+            if not np.isfinite(self.p[name]) or self.p[name] <= 0:
+                raise ValueError(f'{name} must be finite and positive')
+        map_name(self.p['map_name'])
+        self.lock = threading.RLock()
+        self.generation = 0
+        self.latest = None
+        self.history = deque(maxlen=32)
+        self.pending_clouds = deque(maxlen=32)
+        self.last_received_cloud_stamp = None
+        self.cloud_status = 'waiting for first cloud'
+        self.cloud_counts = dict.fromkeys(('received', 'aligned', 'tf_waits', 'expired',
+                                           'invalid_tf', 'age_rejected', 'duplicate', 'queue_dropped'), 0)
+        self.first_received = None
+        self.processed_stamp = None
+        self.correction = np.eye(4)
+        self.initialized = self.p['mode'] == 'mapping'
+        self.seeded = False
+        self.last_accepted = None
+        self.accepted_odom = None
+        self.accepted_match_correction = None
+        self.odom_budget = OdometryBudget()
+        self.localization_state = ''
+        self.localization_detail = ''
+        self.hold_exhausted = ''
+        self.last_tf_stamp = None
+        self.initial_hint_used = False
+        self.pending_initial_pose = None
+        self.waiting_status_time = 0.0
+        self.last_failure = ''
+        self.last_keyframe = None
+        self.last_keyframe_time = None
+        self.mapping_start_pose = None
+        self.mapping_store = (MappingStore(self.p['map_voxel_size'], self.p['voxel_size'])
+                              if self.p['mode'] == 'mapping' else None)
+        self.capacity_warned = False
+        self._points = np.empty((0,3))
+        self._registration_points = np.empty((0,3))
+        self.localization_points = np.empty((0,3))
+        self.grid = ObservedGrid(self.p['grid_resolution'])
+        self.map_metadata = {}
+        self.saved_start_pose = None
+        self.recovery_ever_localized = False
+        self.recovery_trusted_received = None
+        self.recovery_episode = False
+        self.recovery_serial = 0
+        self.recovery_epoch = 0
+        self.recovery_normal_count = 0
+        self.recovery_normal_correction = None
+        self.recovery_normal_stamp = None
+        self.recovery_last_queued = float('-inf')
+        self.recovery_report = dict(state='idle', epoch=0, confirmations=0,
+                                    reason='waiting for initial accepted localization')
+        if self.p['mode'] == 'localization':
+            directory = Path(self.p['map_directory'])
+            self.map_metadata = yaml.safe_load((directory/'metadata.yaml').read_text())
+            if self.p['auto_initialize'] and self.p['initial_from_map_start']:
+                self.saved_start_pose = start_pose_from_metadata(self.map_metadata)
+            self._points = np.asarray(o3d.io.read_point_cloud(str(directory/'map.pcd')).points).copy()
+            if len(self.points) < 100:
+                raise ValueError('Missing/empty 3D map.pcd; localization cannot start')
+            self._registration_points = np.asarray(cloud(self.points,self.p['voxel_size']).points).copy()
+            self.localization_points = np.asarray(cloud(self.points,self.p['localization_voxel_size']).points).copy()
+            self.get_logger().info('Loaded 3D map; automatic initialization from saved mapping start'
+                                   if self.p['auto_initialize'] and self.p['initial_from_map_start'] else
+                                   'Loaded 3D map; waiting for configured or manual /initialpose')
+        self.buffer = Buffer()
+        self.listener = TransformListener(self.buffer, self)
+        self.broadcaster = TransformBroadcaster(self)
+        retained = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.map_pub = self.create_publisher(PointCloud2, '/map_cloud', retained)
+        self.registered_pub = self.create_publisher(PointCloud2, '/registered_cloud', qos_profile_sensor_data)
+        if self.external_backend:
+            # These are accepted GICP poses, never the native /odom estimate.
+            self.frontend_odom_pub = self.create_publisher(Odometry, '/gicp/odom', 100)
+            self.frontend_cloud_pub = self.create_publisher(PointCloud2, '/gicp/scan_cloud', 100)
+            self.keyframe_odom_pub = self.create_publisher(Odometry, '/gicp/keyframe/odom', 100)
+            self.keyframe_cloud_pub = self.create_publisher(PointCloud2, '/gicp/keyframe/cloud', 100)
+        self.valid_pub = self.create_publisher(Bool, '/localization/valid', 1)
+        self.status_pub = self.create_publisher(String, '/localization/status', 1)
+        self.state_pub = self.create_publisher(String, '/localization/state', 1)
+        self.loop_pub = self.create_publisher(String, '/mapping/loop_closure', retained)
+        self.backend_ready = False
+        if self.external_backend:
+            self.create_subscription(Bool, '/mapping/backend_ready', self.backend_readiness, retained)
+        self.recovery_pub = self.create_publisher(String, '/localization/recovery', retained)
+        self.recovery_worker = (RecoveryWorker(Relocalizer(self.localization_points, self.recovery_config),
+                                               self.recovery_completed)
+                                if self.p['mode'] == 'localization' and self.p['auto_relocalization'] else None)
+        self.loop_worker = (MappingLoopWorker(
+            self.lock, loop_config, self.p['map_voxel_size'], self.p['voxel_size'],
+            self.p['grid_resolution'], self.prepare_loop_correction)
+            if self.p['mode'] == 'mapping' and self.p['loop_closure_enabled'] else None)
+        self.last_loop_report = None
+        self.loop_applied_reported = 0
+        self.create_subscription(PointCloud2, '/point_cloud2', self.receive_cloud, qos_profile_sensor_data)
+        self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self.initial_pose, 1)
+        self.create_subscription(Empty, '/localization/recover', self.request_revalidation, 1)
+        self.create_service(Trigger, '/save_3d_map', self.save_map)
+        self.create_timer(0.1, self.health)
+        # Cloud and TF arrive on independent DDS topics. Retry asynchronously
+        # at the original scan timestamp instead of discarding fresh packets.
+        self.create_timer(0.05, self.process_pending_clouds)
+        # Nav2 needs transforms between GICP results, not only at the older
+        # scan stamp after a registration finishes. Hold only a fresh accepted
+        # map correction, timestamped by actual odometry (never future-dated).
+        self.create_timer(0.05, self.publish_correction)
+        self.create_timer(self.p['map_publish_period'], self.publish_map)
+        self.registration_timer = self.create_timer(self.p['registration_period'], self.process,
+                                                    callback_group=MutuallyExclusiveCallbackGroup())
+
+    def report(self, text):
+        self.status_pub.publish(String(data=text))
+        self.get_logger().info(text)
+
+    @property
+    def points(self):
+        """Complete immutable snapshot for publishing/saving, never a live crop."""
+        return self.mapping_store.snapshot() if self.mapping_store is not None else self._points
+
+    @property
+    def registration_points(self):
+        return (self.mapping_store.registration_snapshot() if self.mapping_store is not None
+                else self._registration_points)
+
+    @property
+    def map_point_count(self):
+        return self.mapping_store.count if self.mapping_store is not None else len(self._points)
+
+    def cloud_diagnostics(self):
+        with self.lock:
+            return ('clouds_'+' '.join(f'{name}={count}' for name,count in self.cloud_counts.items())+
+                    f' pending={len(self.pending_clouds)}')
+
+    def receive_cloud(self, message):
+        received = time.monotonic()
+        self.cloud_counts['received'] += 1
+        if message.header.frame_id != 'base_link':
+            self.get_logger().error('Expected cloud already transformed to base_link', throttle_duration_sec=5)
+            return
+        stamp = Time.from_msg(message.header.stamp)
+        age = (self.get_clock().now()-stamp).nanoseconds/1e9
+        if not -0.1 <= age <= 1.0:
+            self.cloud_counts['age_rejected'] += 1
+            self.cloud_status = f'Dropped cloud: timestamp age={age:.3f}s outside [-0.1, 1.0]s'
+            self.get_logger().warning(self.cloud_status, throttle_duration_sec=5)
+            return
+        with self.lock:
+            if (self.last_received_cloud_stamp is not None and
+                    stamp.nanoseconds <= self.last_received_cloud_stamp):
+                self.cloud_counts['duplicate'] += 1
+                return
+            self.last_received_cloud_stamp = stamp.nanoseconds
+            if len(self.pending_clouds) == self.pending_clouds.maxlen:
+                self.cloud_counts['queue_dropped'] += 1
+                self.cloud_status = 'Dropped oldest cloud: pending odometry TF queue full'
+                self.get_logger().warning(self.cloud_status, throttle_duration_sec=5)
+            self.pending_clouds.append((message,received))
+        self.process_pending_clouds()
+
+    def process_pending_clouds(self):
+        with self.lock:
+            # A missing older transform must not block a newer ready packet.
+            for _ in range(len(self.pending_clouds)):
+                message,received = self.pending_clouds.popleft()
+                stamp = Time.from_msg(message.header.stamp)
+                age = (self.get_clock().now()-stamp).nanoseconds/1e9
+                receipt_age = time.monotonic()-received
+                if not -0.1 <= age <= 1.0 or not 0 <= receipt_age <= 1.0:
+                    self.cloud_counts['expired'] += 1
+                    self.cloud_status = (f'Dropped cloud waiting for odometry TF: '
+                                         f'timestamp_age={age:.3f}s receipt_age={receipt_age:.3f}s')
+                    self.get_logger().warning(self.cloud_status, throttle_duration_sec=5)
+                    continue
+                if self.latest is not None and stamp <= Time.from_msg(self.latest[0].header.stamp):
+                    continue
+                try:
+                    odom = self.buffer.lookup_transform('odom','base_link',stamp)
+                except TransformException as error:
+                    self.cloud_counts['tf_waits'] += 1
+                    self.pending_clouds.append((message,received))
+                    self.cloud_status = (f'Waiting for odom -> base_link at cloud timestamp '
+                                         f'{stamp.nanoseconds/1e9:.9f}; retrying fresh packet: {error}')
+                    self.get_logger().warning(self.cloud_status, throttle_duration_sec=5)
+                    continue
+                try:
+                    matrix = transform_matrix(odom.transform)
+                except ValueError as error:
+                    self.cloud_counts['invalid_tf'] += 1
+                    self.cloud_status = f'Dropped cloud: invalid odom -> base_link transform: {error}'
+                    self.get_logger().error(self.cloud_status, throttle_duration_sec=5)
+                    continue
+                self.latest = (message,matrix,received)
+                if self.first_received is None:
+                    self.first_received = received
+                self.history.append(self.latest)
+                self.cloud_counts['aligned'] += 1
+                self.cloud_status = 'cloud aligned with timestamped odometry'
+        self.apply_pending_initial_pose()
+        with self.lock:
+            if (self.latest is not None and self.p['mode'] == 'localization' and self.p['auto_initialize'] and
+                    not self.initial_hint_used):
+                hint = PoseWithCovarianceStamped()
+                hint.header.frame_id = 'map'
+                p,q = hint.pose.pose.position,hint.pose.pose.orientation
+                if self.p['initial_from_map_start']:
+                    start = self.saved_start_pose
+                    p.x,p.y,p.z = map(float, start[:3,3])
+                    q.x,q.y,q.z,q.w = map(float, quaternion_from_matrix(start))
+                    self.seed_initial_pose(hint, exact_body_pose=True)
+                else:
+                    p.x,p.y,p.z = self.p['initial_x'],self.p['initial_y'],self.p['initial_z']
+                    angle = np.deg2rad(self.p['initial_yaw_degrees'])/2
+                    q.z,q.w = float(np.sin(angle)),float(np.cos(angle))
+                    self.initial_pose(hint)
+
+    def initial_pose(self, message):
+        self.seed_initial_pose(message)
+
+    def recovery_status(self, state, reason, confirmations=0, **details):
+        """Publish proof separately from the Bool heartbeat; caller holds lock."""
+        if state != self.recovery_report['state']:
+            self.recovery_epoch += 1
+        self.recovery_report = dict(state=state, epoch=self.recovery_epoch,
+                                    confirmations=int(confirmations), reason=reason, **details)
+        self.recovery_pub.publish(String(data=json.dumps(self.recovery_report, sort_keys=True)))
+
+    def begin_recovery(self, reason):
+        if (self.recovery_worker is None or not self.recovery_ever_localized or
+                not self.seeded or self.pending_initial_pose is not None):
+            return
+        if not self.recovery_episode:
+            self.recovery_episode = True
+            self.recovery_serial += 1
+            self.recovery_normal_count = 0
+            self.recovery_normal_correction = None
+            self.recovery_normal_stamp = None
+            self.recovery_status('searching', reason)
+
+    def request_revalidation(self, message):
+        # Operator can detect a missed Bool heartbeat even when this mapper's
+        # internal tracking remained valid. Require new scan proof in that case.
+        with self.lock:
+            self.begin_recovery('route paused; validating localization with fresh scans')
+
+    def normal_recovery_confirmation(self, correction, odom, received, stamp_ns, fitness, rmse):
+        # Any normal accepted scan invalidates a concurrently computed search.
+        self.recovery_serial += 1
+        was_localized = self.recovery_ever_localized
+        self.recovery_ever_localized = True
+        self.recovery_trusted_received = received
+        if not self.recovery_episode:
+            if not was_localized:
+                self.recovery_status('idle', 'initial trusted localization established')
+            return
+        if fitness < self.recovery_config.min_overlap or rmse > self.recovery_config.max_rmse:
+            # Normal patrol tracking intentionally accepts lower partial
+            # overlap. It cannot alone authorize an automatic route restart.
+            self.recovery_normal_count = 0
+            self.recovery_normal_correction = None
+            self.recovery_normal_stamp = None
+            self.recovery_status('confirming', 'tracking valid; awaiting stronger geometry for route recovery',
+                                 fitness=float(fitness), rmse=float(rmse))
+            return
+        if self.recovery_normal_stamp is not None and received <= self.recovery_normal_stamp:
+            return
+        if self.recovery_normal_stamp is not None:
+            gap = received-self.recovery_normal_stamp
+            if gap < self.recovery_config.confirmation_interval:
+                return
+            if gap > self.recovery_config.confirmation_timeout:
+                self.recovery_normal_count = 0
+                self.recovery_normal_correction = None
+        consistent = False
+        if self.recovery_normal_correction is not None:
+            delta = np.linalg.inv(self.recovery_normal_correction @ odom) @ (correction @ odom)
+            consistent = (np.linalg.norm(delta[:3,3]) <= self.recovery_config.consistency_translation and
+                          rotation_angle(delta) <= np.deg2rad(self.recovery_config.consistency_rotation_degrees))
+        self.recovery_normal_count = self.recovery_normal_count+1 if consistent else 1
+        self.recovery_normal_correction = correction.copy()
+        self.recovery_normal_stamp = received
+        state = ('recovered' if self.recovery_normal_count >= self.recovery_config.confirmations else 'confirming')
+        self.recovery_status(state, 'normal scan matching revalidated', self.recovery_normal_count,
+                             source_stamp=stamp_ns/1e9, method='tracking')
+        if state == 'recovered':
+            self.recovery_episode = False
+
+    def queue_recovery(self, points, odom, source_odom, received, stamp_ns):
+        """Called after a failed normal match with current, contributing input."""
+        self.begin_recovery('normal localization unavailable; searching near trusted odometry prediction')
+        if (not self.recovery_episode or self.recovery_worker is None or
+                self.accepted_match_correction is None or
+                time.monotonic()-self.recovery_last_queued < self.p['recovery_period'] or
+                not 0 <= time.monotonic()-received <= self.p['validity_timeout']):
+            return
+        if (self.recovery_trusted_received is None or
+                time.monotonic()-self.recovery_trusted_received > self.p['recovery_reference_timeout']):
+            self.recovery_status('failed', 'trusted localization reference expired; explicit initialization required')
+            return
+        self.recovery_last_queued = time.monotonic()
+        job = RecoveryJob(self.generation, self.recovery_serial, points.copy(), odom.copy(),
+                          self.accepted_match_correction.copy(), source_odom.copy(), stamp_ns, received)
+        self.recovery_worker.submit(job)
+
+    def recovery_completed(self, job, result, elapsed, error):
+        with self.lock:
+            if (job.generation != self.generation or job.serial != self.recovery_serial or
+                    not self.recovery_episode or not self.recovery_ever_localized):
+                return False
+            if error is not None:
+                self.recovery_status('searching' if error == 'expired recovery computation' else 'failed',
+                                     error, processing_time=elapsed)
+                return False
+            age = (self.get_clock().now().nanoseconds-job.stamp_ns)/1e9
+            if (not 0 <= time.monotonic()-job.received <= min(self.p['validity_timeout'],
+                                                            self.recovery_config.max_scan_age) or
+                    not -0.1 <= age <= self.p['validity_timeout']):
+                self.recovery_status('searching', 'discarded expired recovery result', processing_time=elapsed)
+                return False
+            if (self.recovery_trusted_received is None or
+                    time.monotonic()-self.recovery_trusted_received > self.p['recovery_reference_timeout']):
+                self.recovery_status('failed', 'trusted localization reference expired; explicit initialization required')
+                return False
+            if not result.accepted:
+                self.recovery_status('confirming' if result.confirmations else 'searching', result.reason,
+                                     result.confirmations, processing_time=elapsed,
+                                     fitness=float(result.fitness), rmse=float(result.rmse))
+                return True
+            try:
+                tf = self.buffer.lookup_transform('odom', 'base_link', Time())
+                tf_stamp = Time.from_msg(tf.header.stamp)
+                odom_age = (self.get_clock().now()-tf_stamp).nanoseconds/1e9
+                if not -0.1 <= odom_age <= self.p['localization_odom_timeout']:
+                    raise ValueError('recovery awaits fresh odometry')
+                current_odom = transform_matrix(tf.transform)
+                budget = OdometryBudget()
+                budget.reset(job.source_odom, job.stamp_ns)
+                budget.observe(job.odom, job.stamp_ns)
+                if not budget.observe(current_odom, tf_stamp.nanoseconds):
+                    raise ValueError('recovery odometry clock regressed')
+                if budget.exceeded(self.p['localization_hold_distance'],
+                                   np.deg2rad(self.p['localization_hold_rotation_degrees'])):
+                    raise ValueError('recovery result motion budget exceeded')
+                correction = result.correction.copy()
+                accepted_odom = job.odom.copy()
+            except (TransformException, ValueError) as failure:
+                self.recovery_status('searching', str(failure), processing_time=elapsed)
+                return False
+            # No map, waypoint or raw odometry coordinates change here. This
+            # single correction also drives the body/footprint TF projection.
+            self.correction = correction
+            self.accepted_match_correction = correction.copy()
+            self.accepted_odom = accepted_odom
+            self.last_accepted = job.received
+            self.recovery_trusted_received = job.received
+            self.odom_budget = budget
+            self.hold_exhausted = self.last_failure = ''
+            self.seeded = self.initialized = True
+            self.generation += 1
+            self.recovery_serial += 1
+            self.recovery_episode = False
+            self.recovery_status('recovered', result.reason, result.confirmations,
+                                 source_stamp=job.stamp_ns/1e9, method='local_search',
+                                 fitness=float(result.fitness), rmse=float(result.rmse), processing_time=elapsed)
+            self.get_logger().info('Localization recovered: '+json.dumps(self.recovery_report, sort_keys=True))
+            return True
+
+    def seed_initial_pose(self, message, exact_body_pose=False):
+        if self.p['mode'] != 'localization' or message.header.frame_id != 'map':
+            self.get_logger().warning('/initialpose is supported only in localization, frame map')
+            return
+        with self.lock:
+            pose = message.pose.pose
+            try:
+                position = [pose.position.x,pose.position.y,pose.position.z]
+                if not exact_body_pose:
+                    position = body_seed_position(position, self.map_metadata.get('ground_model'),
+                                                  self.map_metadata.get('body_height_above_ground'))
+                map_base = pose_matrix(position,
+                                       [pose.orientation.x,pose.orientation.y,pose.orientation.z,pose.orientation.w])
+            except ValueError as error:
+                self.get_logger().error(str(error))
+                return
+            # A browser hint can arrive before the first timestamp-aligned
+            # sensor packet. Keep the newest valid user hint, never replace
+            # it with the CLI fallback or continue publishing an old match.
+            self.pending_initial_pose = (map_base, time.monotonic())
+            self.initial_hint_used = True
+            self.initialized, self.seeded = False, False
+            self.last_accepted = None
+            self.accepted_odom = None
+            self.accepted_match_correction = None
+            self.odom_budget.reset(None, None)
+            self.hold_exhausted = ''
+            self.processed_stamp = None
+            self.last_failure = ''
+            self.generation += 1
+            self.recovery_serial += 1
+            self.recovery_ever_localized = self.recovery_episode = False
+            self.recovery_trusted_received = None
+            self.recovery_normal_count = 0
+            self.recovery_status('manual_initialization', 'initial pose supersedes automatic recovery')
+        if not self.apply_pending_initial_pose():
+            self.report(f'Initial-pose hint queued for up to {INITIAL_POSE_WAIT_SECONDS:.0f}s; '
+                        'waiting for fresh cloud and timestamp-aligned odometry; keep robot stationary')
+
+    def apply_pending_initial_pose(self):
+        with self.lock:
+            if self.pending_initial_pose is None:
+                return False
+            map_base, received = self.pending_initial_pose
+            now = time.monotonic()
+            if now-received > INITIAL_POSE_WAIT_SECONDS:
+                self.pending_initial_pose = None
+                self.last_failure = 'Initial-pose hint expired before fresh cloud/odometry; publish actual /initialpose again'
+                text = self.last_failure
+            elif self.latest is None or not 0 <= now-self.latest[2] <= 1.0:
+                return False
+            else:
+                age = (self.get_clock().now()-Time.from_msg(self.latest[0].header.stamp)).nanoseconds/1e9
+                if not -0.1 <= age <= 1.0:
+                    return False
+                self.correction = map_base @ np.linalg.inv(self.latest[1])
+                self.initialized = True
+                self.pending_initial_pose = None
+                text = 'Initial-pose seed received; waiting for accepted GICP match'
+        self.report(text)
+        return self.initialized
+
+    def backend_readiness(self, message):
+        with self.lock:
+            self.backend_ready = bool(message.data)
+
+    def process(self):
+        started = time.monotonic()
+        with self.lock:
+            if self.external_backend and (not self.backend_ready or not all(
+                    publisher.get_subscription_count() for publisher in (
+                        self.frontend_odom_pub, self.frontend_cloud_pub,
+                        self.keyframe_odom_pub, self.keyframe_cloud_pub))):
+                # Discovery order is not guaranteed by launch order. Do not
+                # commit the first map observation before its journal owner
+                # can receive both halves and retain the actual start pose.
+                self.get_logger().info('Waiting for RTAB-Map keyframe journal readiness', throttle_duration_sec=5.)
+                return
+            if self.latest is None or not self.initialized or time.monotonic()-self.latest[2] > 1.0:
+                return
+            if (self.p['mode'] == 'localization' and self.recovery_episode and
+                    self.recovery_worker is not None and self.recovery_worker.busy):
+                # The independent recovery solver owns this CPU slot while
+                # localization is paused. Cloud/TF callbacks keep collecting
+                # fresh data; do not run two heavy GICP solvers concurrently.
+                return
+            message, odom_base, received = self.latest
+            if not self.map_point_count and time.monotonic()-self.first_received < self.p['scan_window']:
+                return
+            stamp = (message.header.stamp.sec, message.header.stamp.nanosec)
+            if stamp == self.processed_stamp:
+                return
+            self.processed_stamp = stamp
+            generation, correction, seeded = self.generation, self.correction.copy(), self.seeded
+            # Arrays are replaced, never edited in place; snapshot references
+            # stay valid while callbacks replace the current map.
+            points = self._registration_points
+            map_count = self.map_point_count
+            localization_points = self.localization_points
+            history = list(self.history)
+            previous_odom = self.accepted_odom
+            previous_match = (self.accepted_match_correction.copy()
+                              if self.accepted_match_correction is not None else correction)
+        try:
+            frames = []
+            frame_sources = []
+            stamp_ns = Time.from_msg(message.header.stamp).nanoseconds
+            inverse_odom = np.linalg.inv(odom_base)
+            for previous,frame_odom,frame_received in history:
+                difference = (stamp_ns-Time.from_msg(previous.header.stamp).nanoseconds)/1e9
+                if 0 <= difference <= self.p['scan_window']:
+                    xyz = filter_points(cloud_xyz(previous))
+                    if not len(xyz):
+                        continue
+                    # Align scan packets using their own timestamped odometry.
+                    # This is not per-return IMU deskew within a scan packet.
+                    frames.append(transform_points(xyz,inverse_odom@frame_odom))
+                    frame_sources.append((frame_received,previous.header.stamp,frame_odom))
+            if not frames:
+                raise ScanMatchUnavailable('Too few finite/range-filtered cloud points')
+            # Empty current packets cannot refresh an estimate made solely
+            # from older window geometry. Keep the newest CONTRIBUTING
+            # scan's original receipt/stamp as the freshness source.
+            source_received,source_stamp,source_odom = max(frame_sources,key=lambda item:item[0])
+            if (self.p['mode'] == 'localization' and self.last_accepted is not None and
+                    source_received <= self.last_accepted):
+                raise ScanMatchUnavailable('No new contributing scan; previous geometry cannot renew acceptance')
+            input_points = filter_points(np.vstack(frames))
+            source = cloud(input_points, self.p['voxel_size'])
+            registration_count = len(source.points)
+            if len(source.points) < 100:
+                raise ScanMatchUnavailable('Too few finite/range-filtered cloud points')
+            # Predict from the last accepted measurement, not the lagging
+            # output filter. At a waypoint stop a sparse/repeating scan can
+            # otherwise chase filter residual into a different ICP basin.
+            # Keep the filtered correction for localization TF/output only.
+            # Mapping predicts from its established coordinate anchor.
+            prediction = previous_match if self.p['mode'] == 'localization' and seeded else correction
+            guess = prediction @ odom_base
+            if not map_count and self.p['mode'] == 'mapping':
+                # Zero first position/heading, but preserve the odometry Z
+                # direction. Identity here had baked initial body roll/pitch
+                # into the entire map and its ground/costmap projection.
+                matched, fitness, rmse = first_map_pose(odom_base), 1.0, 0.0
+            elif self.p['mode'] == 'mapping' or not seeded:
+                if self.mapping_store is not None:
+                    # Only nearby coarse blocks participate in registration;
+                    # all fine blocks remain in the complete saved map.
+                    nearby = self.mapping_store.nearby(guess[:3,3], self.p['submap_radius'])
+                else:
+                    nearby = points[np.linalg.norm(points-guess[:3,3],axis=1) < self.p['submap_radius']]
+                target = cloud(nearby, None)
+                result = align(source, target, guess,
+                               correspondence=self.p['correspondence_distance'],
+                               min_fitness=(self.p['localization_min_fitness']
+                                            if self.p['mode'] == 'localization' else self.p['min_fitness']),
+                               max_rmse=self.p['max_rmse'],
+                               max_translation=self.p['max_translation'] if seeded else 2.0,
+                               max_rotation=self.p['max_rotation'] if seeded else 0.8)
+                require_match(result)
+                matched, fitness, rmse = result.transform, result.fitness, result.rmse
+            else:
+                # Once localized, trust timestamped odometry for the initial
+                # guess rather than starting from a coarse, potentially aliased match.
+                matched = guess
+            if self.p['mode'] == 'localization':
+                nearby = localization_points[np.linalg.norm(localization_points-guess[:3,3],axis=1) < self.p['submap_radius']]
+                expected = transform_points(input_points,matched)
+                margin = 2*self.p['localization_correspondence']
+                lower,upper = expected.min(axis=0)-margin,expected.max(axis=0)+margin
+                nearby = nearby[np.all((nearby >= lower)&(nearby <= upper),axis=1)]
+                fine_source = cloud(input_points,self.p['localization_voxel_size'])
+                registration_count = len(fine_source.points)
+                result = align(fine_source,cloud(nearby,None),matched,
+                               correspondence=self.p['localization_correspondence'],
+                               min_fitness=self.p['localization_min_fitness'],
+                               max_rmse=min(self.p['max_rmse'],self.p['localization_max_rmse']),
+                               max_translation=self.p['localization_max_translation'] if seeded else 2.0,
+                               max_rotation=np.deg2rad(self.p['localization_max_rotation_degrees']) if seeded else 0.8,
+                               iterations=25,innovation_guess=guess)
+                require_match(result, 'Fine GICP ')
+                matched,fitness,rmse = result.transform,result.fitness,result.rmse
+            new_correction = matched@np.linalg.inv(odom_base)
+            # A standing robot's accepted scan-to-map noise must not move
+            # the mapping coordinate anchor on every frame. Use a stricter
+            # 2mm/0.002rad odometry check than the existing jump guard; real
+            # odometry motion still passes through unchanged.
+            hold_mapping_anchor = (self.p['mode'] == 'mapping' and seeded and
+                                   odometry_is_stationary(previous_odom, odom_base, 0.002, 0.002))
+            # Localization compares raw accepted measurements, independent
+            # of display-filter lag. Stationary mapping compares its held
+            # anchor so small successive corrections cannot drift away.
+            translation_limit,rotation_limit = 0.05,0.035
+            if self.p['mode'] == 'localization':
+                translation_limit = self.p['stationary_translation_limit']
+                rotation_limit = np.deg2rad(self.p['stationary_rotation_limit_degrees'])
+            reference = correction if hold_mapping_anchor else previous_match
+            if not static_correction_is_consistent(reference,new_correction,previous_odom,odom_base,
+                                                   translation_limit,rotation_limit):
+                jump = np.linalg.inv(reference@odom_base)@matched
+                raise ValueError(f'Rejected GICP correction jump while odometry stationary: {np.linalg.norm(jump[:3,3]):.3f}m / {np.degrees(rotation_angle(jump)):.2f}deg (limit {translation_limit:.2f}m / {np.degrees(rotation_limit):.1f}deg)')
+            if hold_mapping_anchor:
+                # Validate the pose actually used for accumulation as well
+                # as the raw GICP solution; holding a frame cannot turn a
+                # low-quality scan into a fresh accepted map update.
+                held = o3d.pipelines.registration.evaluate_registration(
+                    source, target, self.p['correspondence_distance'], correction@odom_base)
+                if held.fitness < self.p['min_fitness'] or held.inlier_rmse > self.p['max_rmse']:
+                    raise ScanMatchUnavailable('Stationary mapping anchor overlap/residual rejected')
+                fitness, rmse = held.fitness, held.inlier_rmse
+            age = (self.get_clock().now()-Time.from_msg(source_stamp)).nanoseconds/1e9
+            if (not 0 <= time.monotonic()-source_received <= self.p['validity_timeout'] or
+                    not -0.1 <= age <= self.p['validity_timeout']):
+                raise ScanMatchUnavailable('Registration result too old; reduce cloud/submap size or processing load')
+            # Prepare every fallible map/grid/payload calculation before
+            # committing pose or acceptance. A failed keyframe cannot move
+            # the map frame while its geometry remains at the old pose.
+            output_correction = (correction if hold_mapping_anchor else
+                                 blend_correction(correction,new_correction,self.p['correction_alpha'],odom_base)
+                                 if self.p['mode'] == 'localization' and seeded else new_correction)
+            matched = output_correction@odom_base
+            mapped_points = transform_points(input_points,matched)
+            registered = cloud(mapped_points,self.p['map_voxel_size'])
+            new = np.asarray(registered.points)
+            header = Header(stamp=message.header.stamp,frame_id=self.p['map_frame'])
+            registered_message = xyz_message(header,new)
+            # Prepare optional exports before committing the accepted scan.
+            if self.external_backend:
+                frontend_cloud = xyz_message(Header(stamp=message.header.stamp, frame_id='base_link'), input_points)
+                frontend_odom = Odometry(header=Header(stamp=message.header.stamp, frame_id='gicp_odom'),
+                                         child_frame_id='base_link')
+                t, q = matched[:3,3], quaternion_from_matrix(matched)
+                frontend_odom.pose.pose.position.x, frontend_odom.pose.pose.position.y, frontend_odom.pose.pose.position.z = map(float, t)
+                frontend_odom.pose.pose.orientation.x, frontend_odom.pose.pose.orientation.y, frontend_odom.pose.pose.orientation.z, frontend_odom.pose.pose.orientation.w = map(float, q)
+            now = time.monotonic()
+            update, free_additions = None, None
+            observation = None
+            if self.mapping_store is not None:
+                delta = np.eye(4) if self.last_keyframe is None else np.linalg.inv(self.last_keyframe)@matched
+                elapsed = self.last_keyframe_time is None or now-self.last_keyframe_time >= self.p['keyframe_max_interval']
+                if self.last_keyframe is None or elapsed or np.linalg.norm(delta[:3,3]) > 0.25 or rotation_angle(delta) > 0.17:
+                    update = self.mapping_store.prepare(mapped_points)
+                    free_additions = self.grid.prepare_observation(new,matched[:3,3])
+                    if self.loop_worker is not None:
+                        observation = MappingObservation(input_points, matched)
+            age = (self.get_clock().now()-Time.from_msg(source_stamp)).nanoseconds/1e9
+            if (not 0 <= time.monotonic()-source_received <= self.p['validity_timeout'] or
+                    not -0.1 <= age <= self.p['validity_timeout']):
+                raise ScanMatchUnavailable('Registration result too old after map update preparation; '
+                                           'no pose or map changes committed')
+            with self.lock:
+                if generation != self.generation:
+                    return
+                if update is not None:
+                    self.mapping_store.commit(update)
+                    self.grid.free.update(free_additions)
+                    self.last_keyframe = matched.copy()
+                    self.last_keyframe_time = now
+                    if self.mapping_start_pose is None:
+                        self.mapping_start_pose = matched.copy()
+                    if observation is not None:
+                        self.loop_worker.append(observation)
+                self.correction = output_correction
+                self.seeded = True
+                self.last_accepted = source_received
+                self.last_failure = ''
+                self.accepted_odom = odom_base.copy()
+                self.accepted_match_correction = new_correction.copy()
+                if self.p['mode'] == 'localization':
+                    self.normal_recovery_confirmation(new_correction, odom_base, source_received,
+                                                      Time.from_msg(source_stamp).nanoseconds, fitness, rmse)
+                # Empty latest packets can shift the window reference, but
+                # cannot move the hold's time OR motion anchor forward.
+                self.odom_budget.reset(source_odom, Time.from_msg(source_stamp).nanoseconds)
+                self.odom_budget.observe(odom_base, Time.from_msg(message.header.stamp).nanoseconds)
+                self.hold_exhausted = ''
+                self.registered_pub.publish(registered_message)
+                if self.external_backend:
+                    # Publish TF at this measurement's stamp. Stamping an old
+                    # correction with latest native odometry would let RTAB
+                    # silently substitute a different pose via its TF lookup.
+                    transform = TransformStamped(header=Header(stamp=message.header.stamp, frame_id='gicp_odom'), child_frame_id='odom')
+                    t, q = output_correction[:3,3], quaternion_from_matrix(output_correction)
+                    transform.transform.translation.x, transform.transform.translation.y, transform.transform.translation.z = map(float, t)
+                    transform.transform.rotation.x, transform.transform.rotation.y, transform.transform.rotation.z, transform.transform.rotation.w = map(float, q)
+                    self.broadcaster.sendTransform(transform)
+                    self.frontend_odom_pub.publish(frontend_odom)
+                    self.frontend_cloud_pub.publish(frontend_cloud)
+                    if update is not None:
+                        self.keyframe_odom_pub.publish(frontend_odom)
+                        self.keyframe_cloud_pub.publish(frontend_cloud)
+                count = self.map_point_count
+                threshold = self.p['max_map_points']
+                warn_capacity = (self.mapping_store is not None and not self.capacity_warned and
+                                 threshold > 0 and count > threshold)
+                if warn_capacity:
+                    self.capacity_warned = True
+            if warn_capacity:
+                self.get_logger().warning(f'Map size advisory crossed: {count} points > {threshold}; '
+                    'mapping continues at unchanged resolution; all historical blocks retained. '
+                    'Save a checkpoint when convenient; monitor available memory and storage.')
+            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={count} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}; mapping_anchor={"held" if hold_mapping_anchor else "updated" if self.p["mode"] == "mapping" else "n/a"}; processing_time={time.monotonic()-started:.3f}s source_age={time.monotonic()-source_received:.3f}s; {self.cloud_diagnostics()}'))
+        except Exception as error:
+            with self.lock:
+                if generation != self.generation:
+                    return
+                # A single poor scan does not destroy a still-fresh accepted
+                # estimate. Keep its original receipt deadline and unchanged
+                # correction/reference; do not claim this scan was accepted.
+                recoverable = self.p['mode'] == 'localization' and isinstance(error, ScanMatchUnavailable)
+                if not recoverable:
+                    self.last_accepted = None
+                self.last_failure = str(error)
+                valid, state, _ = self.localization_readiness()
+                if self.p['mode'] == 'localization':
+                    self.recovery_normal_count = 0
+                    if not valid:
+                        self.begin_recovery(state)
+                        if ('input_points' in locals() and len(input_points) >= 100 and
+                                'source_received' in locals()):
+                            self.queue_recovery(input_points, odom_base, source_odom, source_received,
+                                                Time.from_msg(source_stamp).nanoseconds)
+            self.get_logger().warning(str(error), throttle_duration_sec=2.0)
+            self.status_pub.publish(String(data=f'{error}; state={state}; {self.cloud_diagnostics()}'))
+
+    def localization_readiness(self):
+        """Shared validity/TF gate. Caller holds lock; use only real odom stamps."""
+        if not self.seeded or self.last_accepted is None:
+            hint = ('initial-pose hint queued; waiting for fresh cloud/odometry'
+                    if self.pending_initial_pose is not None else
+                    'waiting for initial pose' if not self.initialized else 'waiting for accepted GICP')
+            return False, 'registration_invalid', hint+'; last_match_failure='+self.last_failure
+        now = time.monotonic()
+        accepted_age = now-self.last_accepted
+        detail = (f'accepted_age={accepted_age:.2f}s travel={self.odom_budget.distance:.3f}m'
+                  f' turn={np.degrees(self.odom_budget.angle):.1f}deg'
+                  f'; last_match_failure={self.last_failure or "none"}')
+        if not 0 <= accepted_age <= self.p['localization_hold_timeout']:
+            return False, 'registration_timeout', detail
+        if self.hold_exhausted:
+            return False, self.hold_exhausted, detail
+        if self.latest is None or not 0 <= now-self.latest[2] <= self.p['validity_timeout']:
+            receipt_age = now-self.latest[2] if self.latest is not None else float('inf')
+            return False, 'cloud_timeout', detail+f' cloud_receipt_age={receipt_age:.2f}s'
+        cloud_age = (self.get_clock().now()-Time.from_msg(self.latest[0].header.stamp)).nanoseconds/1e9
+        if not -0.1 <= cloud_age <= self.p['validity_timeout']:
+            return False, 'cloud_timestamp_stale', detail+f' cloud_age={cloud_age:.2f}s'
+        try:
+            odom = self.buffer.lookup_transform('odom', 'base_link', Time())
+            stamp = Time.from_msg(odom.header.stamp)
+            age = (self.get_clock().now()-stamp).nanoseconds/1e9
+            if not -0.1 <= age <= self.p['localization_odom_timeout']:
+                return False, 'odometry_timeout', detail+f' odom_age={age:.2f}s'
+            matrix = transform_matrix(odom.transform)
+        except (TransformException, ValueError) as error:
+            return False, 'odometry_unavailable', detail+f' {error}'
+        if not self.odom_budget.observe(matrix, stamp.nanoseconds):
+            return False, 'odometry_clock_regressed', detail
+        self.hold_exhausted = self.odom_budget.exceeded(
+            self.p['localization_hold_distance'], np.deg2rad(self.p['localization_hold_rotation_degrees']))
+        detail = (f'accepted_age={accepted_age:.2f}s odom_age={age:.2f}s travel={self.odom_budget.distance:.3f}m'
+                  f' turn={np.degrees(self.odom_budget.angle):.1f}deg; last_match_failure={self.last_failure or "none"}')
+        if self.hold_exhausted:
+            return False, self.hold_exhausted, detail
+        state = 'odometry_hold' if self.last_failure or accepted_age > self.p['validity_timeout'] else 'tracking'
+        return True, state, detail
+
+    def health(self):
+        with self.lock:
+            valid = False
+            if self.p['mode'] == 'localization':
+                if self.recovery_worker is not None and self.recovery_worker.last_error is not None:
+                    self.recovery_status('failed', 'recovery callback failed: '+self.recovery_worker.last_error)
+                    self.recovery_worker.last_error = None
+                valid, state, detail = self.localization_readiness()
+                if not valid:
+                    self.begin_recovery(state)
+                if state != self.localization_state or time.monotonic()-self.waiting_status_time > 2:
+                    self.report(f'Localization state={state} valid={valid}; {detail}; '
+                                f'{self.cloud_status}; {self.cloud_diagnostics()}')
+                    self.waiting_status_time = time.monotonic()
+                self.localization_state, self.localization_detail = state, detail
+                self.state_pub.publish(String(data=f'state={state} valid={valid}; {detail}'))
+            elif self.loop_worker is not None:
+                report = self.loop_worker.report()
+                self.loop_pub.publish(String(data=json.dumps(report, sort_keys=True)))
+                summary = (report['state'], report['applied_loops'], report['error'])
+                if ((summary != self.last_loop_report and report['state'] in ('applied', 'error', 'rebuilding')) or
+                        report['applied_loops'] > self.loop_applied_reported):
+                    self.get_logger().info('Mapping loop closure: '+json.dumps(report, sort_keys=True))
+                self.loop_applied_reported = report['applied_loops']
+                self.last_loop_report = summary
+        self.valid_pub.publish(Bool(data=valid))
+
+    def prepare_loop_correction(self, store, grid, poses, delta):
+        """Prepare allocations before backend commit; return a ref-only swap."""
+        correction = delta @ self.correction
+        accepted = (delta @ self.accepted_match_correction
+                    if self.accepted_match_correction is not None else None)
+        last, start, generation = poses[-1], poses[0], self.generation+1
+        def publish():
+            self.mapping_store, self.grid = store, grid
+            self.correction, self.accepted_match_correction = correction, accepted
+            self.last_keyframe, self.mapping_start_pose = last, start
+            # Reject registration prepared against the previous map revision.
+            # Raw odometry, timestamps and freshness budgets stay intact.
+            self.generation = generation
+        return publish
+
+    def destroy_node(self):
+        if getattr(self, 'recovery_worker', None) is not None:
+            self.recovery_worker.close()
+        if getattr(self, 'loop_worker', None) is not None:
+            self.loop_worker.close()
+        return super().destroy_node()
+
+    def publish_correction(self):
+        if self.external_backend:
+            # Accepted-scan callback owns gicp_odom->odom in this mode.
+            return
+        with self.lock:
+            if self.p['mode'] == 'localization':
+                valid, _, _ = self.localization_readiness()
+            else:
+                valid = (self.seeded and self.last_accepted is not None and
+                         0 <= time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
+            if not valid:
+                return
+            try:
+                odom = self.buffer.lookup_transform('odom','base_link',Time())
+            except TransformException:
+                return
+            stamp = Time.from_msg(odom.header.stamp)
+            age = (self.get_clock().now()-stamp).nanoseconds/1e9
+            if not -0.1 <= age <= self.p['validity_timeout']:
+                return
+            if self.last_tf_stamp is not None and stamp.nanoseconds <= self.last_tf_stamp:
+                return
+            transform = TransformStamped()
+            transform.header.stamp = odom.header.stamp
+            transform.header.frame_id,transform.child_frame_id = 'map','odom'
+            t,q = self.correction[:3,3],quaternion_from_matrix(self.correction)
+            transform.transform.translation.x,transform.transform.translation.y,transform.transform.translation.z = map(float,t)
+            transform.transform.rotation.x,transform.transform.rotation.y,transform.transform.rotation.z,transform.transform.rotation.w = map(float,q)
+            # Keep true 6D body/point-cloud poses. Nav2 gets a separate 2D
+            # footprint on the map grid, with measured XY and yaw preserved.
+            body = self.correction@transform_matrix(odom.transform)
+            body_footprint = np.linalg.inv(body)@planar_pose(body)
+            footprint = TransformStamped()
+            footprint.header.stamp = odom.header.stamp
+            footprint.header.frame_id,footprint.child_frame_id = 'base_link','base_footprint'
+            t,q = body_footprint[:3,3],quaternion_from_matrix(body_footprint)
+            footprint.transform.translation.x,footprint.transform.translation.y,footprint.transform.translation.z = map(float,t)
+            footprint.transform.rotation.x,footprint.transform.rotation.y,footprint.transform.rotation.z,footprint.transform.rotation.w = map(float,q)
+            self.broadcaster.sendTransform([transform,footprint])
+            self.last_tf_stamp = stamp.nanoseconds
+
+    def publish_map(self):
+        if self.external_backend and not self.map_pub.get_subscription_count():
+            return
+        with self.lock:
+            points = self.points
+            generation = self.generation
+        if len(points):
+            header = Header(stamp=self.get_clock().now().to_msg(),frame_id=self.p['map_frame'])
+            message = xyz_message(header,points)
+            with self.lock:
+                if generation == self.generation:
+                    self.map_pub.publish(message)
+
+    def save_map(self, request, response):
+        if self.external_backend:
+            response.success, response.message = False, 'Use /save_3d_map from RTAB-Map backend; unoptimized frontend export is disabled'
+            return response
+        if self.p['mode'] != 'mapping':
+            response.success, response.message = False, 'Save is available only in mapping mode'
+            return response
+        with self.lock:
+            if self.loop_worker is not None and not self.loop_worker.ready_for_save():
+                response.success, response.message = False, (
+                    'Loop closure check/rebuild pending or failed; stop at the revisited area, '
+                    'wait for /mapping/loop_closure checked_observations=observations and '
+                    'state=idle/applied, then save again. '+json.dumps(self.loop_worker.report()))
+                return response
+            points, free = self.points.copy(), self.grid.free.copy()
+            start_pose = self.mapping_start_pose.copy() if self.mapping_start_pose is not None else np.eye(4)
+            loop_report = (dict(enabled=True, **self.loop_worker.report()) if self.loop_worker is not None
+                           else dict(enabled=False, applied_loops=0))
+        if len(points) < 100:
+            response.success, response.message = False, 'No usable 3D map yet'
+            return response
+        try:
+            aligned = save_snapshot(points, free, start_pose, self.p, loop_report,
+                'GICP scan-to-map with SE3 pose-graph loop closure enabled'
+                if self.loop_worker is not None else 'incremental GICP scan-to-map; loop closure disabled')
+            response.success, response.message = True, str(aligned)
+        except Exception as error:
+            response.success, response.message = False, str(error)
+        return response
+
+
+def main():
+    rclpy.init()
+    node = Mapper()
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        executor.shutdown()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

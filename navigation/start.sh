@@ -10,7 +10,7 @@ version=$(/usr/bin/python3 "$repo/navigation/select_map.py" "$1")
 dds_file=${GO2_DDS_FILE:-$HOME/cyclonedds_ws/cyclonedds.xml}
 [[ -r $dds_file ]] || { echo "缺少 Go2 DDS 配置 $dds_file" >&2; exit 1; }
 mkdir -p "$HOME/.ros" "$HOME/.cache/go2_lio_navigation"
-exec 8>"$HOME/.ros/go2_lio_navigation.lock"
+exec 8>>"$HOME/.ros/go2_lio_navigation.lock"
 flock -n 8 || { echo '已有导航窗口正在运行。' >&2; exit 1; }
 flock -n "$HOME/.ros/go2_one_command_start.lock" true || {
     echo '请先保存地图，在原建图窗口按 Ctrl+C；等该窗口退出，再启动导航。' >&2; exit 1;
@@ -28,40 +28,32 @@ for active in $("${docker_cmd[@]}" ps --format '{{.Names}}'); do
     esac
 done
 cache="$HOME/.cache/go2_lio_navigation"
-echo "导航使用地图版本 $version"
-echo '正在检查 Humble 环境并准备 GICP 目标和 Nav2 栅格；后续运行复用本版本的有效缓存。'
+original="$repo/navigation/original_go2"
+runtime=$(mktemp -d "${TMPDIR:-/tmp}/go2-nav-config.XXXXXXXX")
+trap 'rm -rf -- "$runtime"' EXIT
+mkdir -p "$runtime/navigation_map"
+echo "原 Go2 导航 · 地图版本 $version"
+echo '检查旧版 Nav2 插件、生成 SDK 配置，并从本次地图存档准备原 Go2 使用的地图。'
 prepared=$("${docker_cmd[@]}" run --rm --init --network none --user "$(id -u):$(id -g)" \
     -e HOME=/tmp -e OPENBLAS_NUM_THREADS=1 -e OMP_NUM_THREADS=2 -e PYTHONDONTWRITEBYTECODE=1 \
-    -v "$repo:/repo:ro" -v "$version:/map_source:ro" -v "$cache:/cache" --entrypoint /bin/bash "$image" -c '
+    -v "$repo:/repo:ro" -v "$original:/opt/go2_project:ro" -v "$runtime:/runtime:rw" \
+    -v "$version:/map_source:ro" -v "$cache:/cache:rw" --entrypoint /bin/bash "$image" -c '
         set -e
         source /opt/ros/humble/setup.bash
         source /ros2_ws/install/setup.bash
-        cd /repo/navigation
-        env -u CYCLONEDDS_URI ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=0 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
-            /usr/bin/python3 - >&2 <<PY_RUNTIME
-import open3d as o3d
-import rclpy
-import gicp_localizer
-import mission
-import nav2_ready
-
-o3d.geometry.KDTreeFlann().search_radius_vector_3d
-registration = o3d.pipelines.registration
-registration.registration_generalized_icp
-registration.TransformationEstimationForGeneralizedICP()
-
-# Construct the real mission node inside the isolated container without spinning it.
-rclpy.init(args=[])
-try:
-    mission.Mission().destroy_node()
-finally:
-    rclpy.shutdown()
-PY_RUNTIME
-        for pkg in nav2_map_server nav2_planner nav2_controller nav2_behaviors nav2_velocity_smoother nav2_bt_navigator nav2_lifecycle_manager nav2_rotation_shim_controller foxglove_bridge; do ros2 pkg prefix "$pkg" >/dev/null; done
-        exec /usr/bin/python3 -u /repo/navigation/prepare_map.py /map_source /cache')
-[[ $prepared == /cache/* && -s "$cache/${prepared#/cache/}/nav.yaml" ]] || {
-    echo "地图准备未返回有效栅格：$prepared" >&2; exit 1;
-}
+        cd /opt/go2_project/go2_3d
+        for pkg in nav2_bringup pointcloud_to_laserscan robot_state_publisher foxglove_bridge; do
+            ros2 pkg prefix "$pkg" >/dev/null
+        done
+        /usr/bin/python3 check_nav2_plugins.py >&2
+        /usr/bin/python3 prepare.py --mode mapping >&2
+        /usr/bin/python3 -c "import mapper, operator_bridge, obstacle_cloud, control_bridge, navigation_diagnostics" >&2
+        exec /usr/bin/python3 -u /repo/navigation/prepare_go2_map.py /map_source /cache')
+[[ $prepared =~ ^/cache/(original-go2-[a-f0-9]{24})$ ]] || { echo "导航地图准备失败: $prepared" >&2; exit 1; }
+map_cache="$cache/${BASH_REMATCH[1]}"
+for file in map.pcd metadata.yaml nav.yaml nav.pgm; do
+    [[ -s "$map_cache/$file" ]] || { echo "缺少导航地图文件: $map_cache/$file" >&2; exit 1; }
+done
 /usr/bin/python3 - <<'PY_PORT'
 import socket
 with socket.socket() as s:
@@ -84,7 +76,7 @@ cleanup() {
         kill -TERM "$lidar_pid" 2>/dev/null || :
         wait "$lidar_pid" 2>/dev/null || :
     fi
-    rm -rf -- "$share"
+    rm -rf -- "$share" "$runtime"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -102,13 +94,29 @@ done
 wifi=$(ip -o -4 addr show dev wlan0 2>/dev/null | awk 'NR==1 {split($4, a, "/"); print a[1]}')
 [[ -z $wifi ]] || echo "Foxglove WebSocket：ws://$wifi:8766"
 echo '初始定位采用所选地图的建图起点及朝向；在其他位置可用 Foxglove 的“估计位姿”指定。运动初始关闭。'
+diag_root="$HOME/.local/state/go2-navigation/diagnostics"
+session=$(/usr/bin/python3 - "$original/go2_3d" "$diag_root" "$version" <<'PY_SESSION'
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from fault_store import create_session
+root = Path(sys.argv[2])
+root.mkdir(parents=True, exist_ok=True)
+print(create_session(root, {"map_source": sys.argv[3], "capture_pid": os.getppid()}))
+PY_SESSION
+)
+diagnostics_mounts=(-v "$session:/diagnostics:rw" -e GO2_DIAGNOSTICS_SESSION=/diagnostics
+                   -e GO2_DIAGNOSTICS_UID="$(id -u)" -e GO2_DIAGNOSTICS_GID="$(id -g)")
+echo "导航事件目录 $session"
 "${docker_cmd[@]}" run --rm --init --network host --name "$container" \
     -e ROS_DOMAIN_ID=0 -e ROS_LOCALHOST_ONLY=0 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
     -e CYCLONEDDS_URI=file:///etc/cyclonedds.xml -e OPENBLAS_NUM_THREADS=1 -e OMP_NUM_THREADS=2 \
     -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONUNBUFFERED=1 \
-    -v "$dds_file:/etc/cyclonedds.xml:ro" -v "$repo:/repo:ro" -v "$version:/map_source:ro" \
-    -v "$cache:/cache:ro" -v "$share:/run/go2_scan:ro" --entrypoint /bin/bash "$image" \
-    -c 'set -e; source /opt/ros/humble/setup.bash; source /ros2_ws/install/setup.bash; exec /usr/bin/python3 -u /repo/navigation/run_stack.py "$1"' bash "$prepared" 8>&- &
+    -v "$dds_file:/etc/cyclonedds.xml:ro" -v "$repo:/repo:ro" -v "$original:/opt/go2_project:ro" \
+    -v "$version:/map_source:ro" -v "$runtime:/runtime:ro" -v "$map_cache:/runtime/navigation_map:ro" \
+    "${diagnostics_mounts[@]}" -v "$share:/run/go2_scan:ro" --entrypoint /bin/bash "$image" \
+    -c 'set -e; source /opt/ros/humble/setup.bash; source /ros2_ws/install/setup.bash; exec /usr/bin/python3 -u /repo/navigation/run_stack.py' 8>&- &
 docker_pid=$!
 # Both processes are critical. Cleanup revokes the lease before stopping the host sensor.
 set +e

@@ -33,11 +33,11 @@ def main():
         while rclpy.ok():
             subscribers = node.get_subscriptions_info_by_topic('/goal_pose')
             if (publisher.get_subscription_count() and
-                    any(e.node_name == 'go2_nav_mission' and e.node_namespace == '/'
+                    any(e.node_name == 'go2_operator' and e.node_namespace == '/'
                         for e in subscribers)):
                 break
             if time.monotonic() > deadline:
-                sys.exit('未发现导航队列节点 /go2_nav_mission，未发送目标。')
+                sys.exit('未发现导航队列节点 /go2_operator，未发送目标。')
             rclpy.spin_once(node, timeout_sec=.1)
         sent = 0
         for x, y, heading in args.goals:

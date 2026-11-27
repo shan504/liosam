@@ -4,10 +4,10 @@
       "followTf": "map",
       "followMode": "follow-none",
       "cameraState": {
-        "perspective": true,
-        "distance": 11,
-        "phi": 50,
-        "thetaOffset": 225,
+        "perspective": false,
+        "distance": 12,
+        "phi": 0,
+        "thetaOffset": 0,
         "target": [
           0,
           0,
@@ -41,12 +41,8 @@
       "topics": {
         "/map": {
           "visible": true,
-          "colorMode": "custom",
-          "alpha": 1.0,
-          "minColor": "#ffffffff",
-          "maxColor": "#101214ff",
-          "unknownColor": "#858a8eff",
-          "invalidColor": "#d96c23ff"
+          "colorMode": "map",
+          "alpha": 0.65
         },
         "/map_cloud": {
           "visible": true,
@@ -54,18 +50,24 @@
           "colorMode": "colormap",
           "colorField": "z",
           "colorMap": "turbo",
-          "decayTime": 0,
-          "minValue": 0.1
+          "decayTime": 0
+        },
+        "/registered_cloud": {
+          "visible": true,
+          "pointSize": 2,
+          "colorMode": "flat",
+          "flatColor": "#36e5ffff",
+          "decayTime": 0
         },
         "/global_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
-          "alpha": 0.24
+          "alpha": 0.3
         },
         "/local_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
-          "alpha": 0.4
+          "alpha": 0.3
         },
         "/plan": {
           "visible": true
@@ -83,29 +85,16 @@
           "visible": true
         },
         "/goal_pose": {
+          "visible": true
+        },
+        "/point_cloud2": {
           "visible": false
         },
         "/navigation/waypoints": {
           "visible": true
         },
-        "/navigation/scan": {
-          "visible": false,
-          "pointSize": 2,
-          "colorMode": "flat",
-          "flatColor": "#36e5ffff",
-          "decayTime": 0
-        },
         "/go2_visual/live/model_mesh": {
           "visible": true
-        },
-        "/navigation/cloud_filtered": {
-          "visible": true,
-          "pointSize": 1,
-          "colorMode": "colormap",
-          "decayTime": 0,
-          "colorField": "z",
-          "colorMap": "turbo",
-          "minValue": 0.1
         }
       },
       "layers": {},
@@ -118,9 +107,7 @@
         "poseEstimateXDeviation": 0.5,
         "poseEstimateYDeviation": 0.5,
         "poseEstimateThetaDeviation": 0.26179939
-      },
-      "fixedFrame": "map",
-      "foxglovePanelTitle": "GICP 初始位姿"
+      }
     },
     "3D!g2goal": {
       "followTf": "map",
@@ -163,12 +150,8 @@
       "topics": {
         "/map": {
           "visible": true,
-          "colorMode": "custom",
-          "alpha": 1.0,
-          "minColor": "#ffffffff",
-          "maxColor": "#101214ff",
-          "unknownColor": "#858a8eff",
-          "invalidColor": "#d96c23ff"
+          "colorMode": "map",
+          "alpha": 0.65
         },
         "/map_cloud": {
           "visible": true,
@@ -176,18 +159,24 @@
           "colorMode": "colormap",
           "colorField": "z",
           "colorMap": "turbo",
-          "decayTime": 0,
-          "minValue": 0.1
+          "decayTime": 0
+        },
+        "/registered_cloud": {
+          "visible": true,
+          "pointSize": 2,
+          "colorMode": "flat",
+          "flatColor": "#36e5ffff",
+          "decayTime": 0
         },
         "/global_costmap/costmap": {
-          "visible": false,
+          "visible": true,
           "colorMode": "costmap",
-          "alpha": 0.24
+          "alpha": 0.3
         },
         "/local_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
-          "alpha": 0.4
+          "alpha": 0.3
         },
         "/plan": {
           "visible": true
@@ -202,32 +191,19 @@
           "visible": true
         },
         "/initialpose": {
-          "visible": false
+          "visible": true
         },
         "/goal_pose": {
           "visible": true
         },
+        "/point_cloud2": {
+          "visible": false
+        },
         "/navigation/waypoints": {
           "visible": true
         },
-        "/navigation/scan": {
-          "visible": false,
-          "pointSize": 2,
-          "colorMode": "flat",
-          "flatColor": "#36e5ffff",
-          "decayTime": 0
-        },
         "/go2_visual/live/model_mesh": {
           "visible": true
-        },
-        "/navigation/cloud_filtered": {
-          "visible": true,
-          "pointSize": 1,
-          "colorMode": "colormap",
-          "decayTime": 0,
-          "colorField": "z",
-          "colorMap": "turbo",
-          "minValue": 0.1
         }
       },
       "layers": {},
@@ -240,9 +216,7 @@
         "poseEstimateXDeviation": 0.5,
         "poseEstimateYDeviation": 0.5,
         "poseEstimateThetaDeviation": 0.26179939
-      },
-      "fixedFrame": "map",
-      "foxglovePanelTitle": "多点导航"
+      }
     },
     "Publish!g2enable": {
       "topicName": "/control/enable",
@@ -250,7 +224,7 @@
       "value": "{\"data\":true}",
       "advancedView": true,
       "buttonText": "启用运动",
-      "buttonTooltip": "开始或恢复已排队的航点",
+      "buttonTooltip": "启用运动",
       "buttonColor": "#227b3a"
     },
     "Publish!g2stop": {
@@ -259,7 +233,7 @@
       "value": "{\"data\":false}",
       "advancedView": true,
       "buttonText": "停止运动＋取消导航",
-      "buttonTooltip": "立即暂停运动，取消活动任务，保留全部未完成航点",
+      "buttonTooltip": "停止运动＋取消导航",
       "buttonColor": "#c52430"
     },
     "Publish!g2cancel": {
@@ -267,9 +241,116 @@
       "datatype": "std_msgs/msg/Empty",
       "value": "{}",
       "advancedView": true,
-      "buttonText": "取消当前目标",
-      "buttonTooltip": "暂停并移除活动航点，后续航点保留",
+      "buttonText": "取消路线",
+      "buttonTooltip": "取消路线",
       "buttonColor": "#b76b12"
+    },
+    "Image!g2camera": {
+      "followTf": "map",
+      "followMode": "follow-none",
+      "cameraState": {
+        "perspective": false,
+        "distance": 12,
+        "phi": 0,
+        "thetaOffset": 0,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.01,
+        "far": 5000
+      },
+      "scene": {
+        "backgroundColor": "#15191d",
+        "meshUpAxis": "z_up",
+        "transforms": {
+          "showLabel": false,
+          "axisScale": 0.3,
+          "lineWidth": 0
+        }
+      },
+      "transforms": {},
+      "topics": {
+        "/map": {
+          "visible": true,
+          "colorMode": "map",
+          "alpha": 0.65
+        },
+        "/map_cloud": {
+          "visible": true,
+          "pointSize": 1,
+          "colorMode": "colormap",
+          "colorField": "z",
+          "colorMap": "turbo",
+          "decayTime": 0
+        },
+        "/registered_cloud": {
+          "visible": true,
+          "pointSize": 2,
+          "colorMode": "flat",
+          "flatColor": "#36e5ffff",
+          "decayTime": 0
+        },
+        "/global_costmap/costmap": {
+          "visible": false,
+          "colorMode": "costmap",
+          "alpha": 0.3
+        },
+        "/local_costmap/costmap": {
+          "visible": false,
+          "colorMode": "costmap",
+          "alpha": 0.3
+        },
+        "/plan": {
+          "visible": true
+        },
+        "/local_plan": {
+          "visible": true
+        },
+        "/global_costmap/published_footprint": {
+          "visible": true
+        },
+        "/local_costmap/published_footprint": {
+          "visible": true
+        },
+        "/initialpose": {
+          "visible": true
+        },
+        "/goal_pose": {
+          "visible": true
+        },
+        "/point_cloud2": {
+          "visible": false
+        }
+      },
+      "layers": {},
+      "imageMode": {
+        "imageTopic": "/camera/image/compressed",
+        "synchronize": false
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/goal_pose",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "cameraTopic": "/camera/image/compressed"
     },
     "RawMessages!g2valid": {
       "topicPath": "/localization/valid",
@@ -292,28 +373,14 @@
       "diffTopicPath": "",
       "showFullMessageForDiff": false
     },
-    "Publish!g2clear": {
-      "topicName": "/navigation/clear_queue",
+    "Publish!g2resume": {
+      "topicName": "/navigation/resume",
       "datatype": "std_msgs/msg/Empty",
       "value": "{}",
       "advancedView": true,
-      "buttonText": "清空整条队列",
-      "buttonColor": "#326bb7",
-      "buttonTooltip": "停下并清空所有未完成航点"
-    },
-    "RawMessages!g2control": {
-      "topicPath": "/control/status",
-      "diffEnabled": false,
-      "diffMethod": "custom",
-      "diffTopicPath": "",
-      "showFullMessageForDiff": false
-    },
-    "RawMessages!g2ready": {
-      "topicPath": "/navigation/startup_status",
-      "diffEnabled": false,
-      "diffMethod": "custom",
-      "diffTopicPath": "",
-      "showFullMessageForDiff": false
+      "buttonText": "重试暂停路线",
+      "buttonTooltip": "修复失败点后，显式重试并继续后续航点",
+      "buttonColor": "#326bb7"
     }
   },
   "globalVariables": {},
@@ -335,7 +402,7 @@
           "first": "Publish!g2stop",
           "second": {
             "first": "Publish!g2cancel",
-            "second": "Publish!g2clear",
+            "second": "Publish!g2resume",
             "direction": "column",
             "splitPercentage": 50
           },
@@ -349,25 +416,20 @@
       "splitPercentage": 80
     },
     "second": {
-      "first": {
-        "first": "RawMessages!g2ready",
+      "first": "Image!g2camera",
+      "second": {
+        "first": "RawMessages!g2valid",
         "second": {
-          "first": "RawMessages!g2valid",
-          "second": "RawMessages!g2gicp",
+          "first": "RawMessages!g2gicp",
+          "second": "RawMessages!g2operator",
           "direction": "column",
-          "splitPercentage": 26
+          "splitPercentage": 50
         },
         "direction": "column",
-        "splitPercentage": 26
-      },
-      "second": {
-        "first": "RawMessages!g2operator",
-        "second": "RawMessages!g2control",
-        "direction": "column",
-        "splitPercentage": 60
+        "splitPercentage": 25
       },
       "direction": "column",
-      "splitPercentage": 50
+      "splitPercentage": 45
     },
     "direction": "row",
     "splitPercentage": 75

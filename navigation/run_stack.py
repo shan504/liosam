@@ -26,16 +26,18 @@ def stop(children, grace):
                 pass
 
 
-def run(cache):
+def run():
     here = Path(__file__).resolve().parent
     py = sys.executable
     commands = {
-        'Go2/MID-360S': [py, '-u', here/'nav_sensors.py', '--scan-dir', '/run/go2_scan', '--map-dir', '/map_source',
-                           '--geometry', cache/'metadata.json'],
-        'GICP': [py, '-u', here/'gicp_localizer.py', cache],
-        'Nav2': ['ros2', 'launch', here/'nav2.launch.py', 'map:=' + str(cache/'nav.yaml')],
-        'Foxglove': ['ros2', 'launch', here/'foxglove.launch.xml'],
-        '航点与运动控制': [py, '-u', here/'mission.py'],
+        'Go2/MID-360S': [py, '-u', here/'nav_sensors.py', '--go2-cloud',
+                         '--scan-dir', '/run/go2_scan', '--map-dir', '/map_source'],
+        'Go2 模型': [py, '-u', here/'robot_model.py'],
+        '原 Go2 导航': [
+            'ros2', 'launch', '/opt/go2_project/go2_3d/stack.launch.py',
+            'mode:=navigation', 'auto_initialize:=true', 'initial_from_map_start:=true',
+            'gicp_params:=/opt/go2_project/go2_3d/gicp_dense.yaml', 'port:=8766',
+        ],
     }
     lease = Path('/run/go2_scan/running')
     stopping = False
@@ -60,11 +62,11 @@ def run(cache):
             time.sleep(.15)
         return 0
     finally:
-        mission = processes.pop('航点与运动控制', None)
-        if mission is not None:
-            stop([mission], 3)
+        navigation = processes.pop('原 Go2 导航', None)
+        if navigation is not None:
+            stop([navigation], 12)
         stop(list(processes.values()), 5)
 
 
 if __name__ == '__main__':
-    sys.exit(run(Path(sys.argv[1])))
+    sys.exit(run())

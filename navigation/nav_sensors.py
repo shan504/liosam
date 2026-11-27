@@ -9,13 +9,15 @@ import os
 from pathlib import Path
 import struct
 import sys
+from xml.etree import ElementTree
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'noetic'))
 from check_returns import wire_points
 from dense_map import transform
-from native_cloud import calibration, compose_rotation, interpolate, place
+from mount_setup import urdf_mount
+from native_cloud import calibration, compose_rotation, interpolate, place, same_mount
 from native_odom import read_sample, validated
 from native_sensor_clock import SensorClock
 
@@ -54,13 +56,35 @@ def yaw_only(q):
     return np.array((0., 0., math.sin(.5*yaw), math.cos(.5*yaw)))
 
 
+def needs_mount_tf(urdf_path, child, mount):
+    """A custom SDK URDF can already provide the measured rigid mount."""
+    xml = urdf_path.read_bytes()
+    robot = ElementTree.fromstring(xml)
+    if child not in {link.get('name') for link in robot.findall('link')}:
+        return True
+    existing = urdf_mount(xml, child)
+    if existing is None or not same_mount(np.asarray(existing), mount):
+        raise ValueError(f'模型中已有 {child}，其固定变换与保存的雷达安装外参不一致')
+    return False
+
+
+def outside_body(body):
+    on_robot = ((abs(body[:, 0]) < .37) & (abs(body[:, 1]) < .17) &
+                (body[:, 2] < .15) & (body[:, 2] > -.35))
+    return ~on_robot
+
+
+def body_scan(world, body_pose):
+    """Express deskewed returns in base_link at the scan acquisition stamp."""
+    body = transform(world, body_pose, inverse=True)
+    return body[outside_body(body)]
+
+
 def scan_geometry(world, body_pose, lidar_pose, body_height, band=(.085, .85)):
     # Returns selected in a horizontal obstacle slab around the standing robot.
     # The actual emitter origin is retained even when its mount pitches down.
     body = transform(world, body_pose, inverse=True)
-    self_hit = ((abs(body[:, 0]) < .37) & (abs(body[:, 1]) < .17) &
-                (body[:, 2] < .15) & (body[:, 2] > -.35))
-    world = world[~self_hit]
+    world = world[outside_body(body)]
     lidar = transform(world, lidar_pose, inverse=True)
     q_level = yaw_only(body_pose[3:])
     level = transform(world, np.r_[lidar_pose[:3], q_level], inverse=True)
@@ -103,12 +127,16 @@ def main():
     parser.add_argument('--map-dir', required=True, type=Path)
     parser.add_argument('--scan-dir', required=True, type=Path)
     parser.add_argument('--mount', type=Path, help='current physical mount, if remounted after survey')
+    parser.add_argument('--go2-cloud', action='store_true',
+                        help='publish the original Go2 stack input /point_cloud2 in base_link')
+    parser.add_argument('--robot-urdf', type=Path, default=Path('/runtime/config/go2_edu.urdf'),
+                        help='expanded URDF used by the Go2 stack robot_state_publisher')
     parser.add_argument('--geometry', type=Path, help='prepared map metadata with calibrated height band')
     parser.add_argument('--body-height', type=float,
                         help='standing body origin height in metres, used for the obstacle height band')
     args, ros_args = parser.parse_known_args()
     body_height, band = .327, (.085, .85)
-    if args.geometry:
+    if args.geometry and not args.go2_cloud:
         metadata = json.loads(args.geometry.read_text())
         body_height = float(metadata['initial_base_pose'][2])
         band = tuple(map(float, metadata['obstacle_band_m']))
@@ -117,6 +145,7 @@ def main():
     if not .05 <= body_height <= .65 or len(band) != 2 or not 0. <= band[0] < band[1] <= 2.:
         parser.error('地图中站立机身高度或障碍物高度带无效，请核对保存时的地面与外参')
     sensor_frame, mount, mount_path = mount_config(args.map_dir, args.mount)
+    publish_mount = not args.go2_cloud or needs_mount_tf(args.robot_urdf, sensor_frame, mount)
     file = args.scan_dir / 'scan.bin'
 
     def edge(stamp, parent, child, xyz, q):
@@ -131,13 +160,16 @@ def main():
         def __init__(self):
             super().__init__('go2_navigation_sensors')
             self.odom = self.create_publisher(Odometry, '/odom', 10)
-            self.cloud = self.create_publisher(PointCloud2, '/navigation/cloud', sensor_qos)
-            self.obstacles = self.create_publisher(PointCloud2, '/navigation/obstacles', 5)
-            self.scan = self.create_publisher(LaserScan, '/navigation/scan', sensor_qos)
+            self.cloud_topic = '/point_cloud2' if args.go2_cloud else '/navigation/cloud'
+            self.cloud = self.create_publisher(PointCloud2, self.cloud_topic, sensor_qos)
+            if not args.go2_cloud:
+                self.obstacles = self.create_publisher(PointCloud2, '/navigation/obstacles', 5)
+                self.scan = self.create_publisher(LaserScan, '/navigation/scan', sensor_qos)
             self.tf = TransformBroadcaster(self)
-            self.static = StaticTransformBroadcaster(self)
-            self.static.sendTransform(edge(self.get_clock().now().to_msg(), 'base_link', sensor_frame,
-                                           mount[:3], mount[3:]))
+            if publish_mount:
+                self.static = StaticTransformBroadcaster(self)
+                self.static.sendTransform(edge(self.get_clock().now().to_msg(), 'base_link', sensor_frame,
+                                               mount[:3], mount[3:]))
             self.fields = [PointField(name=n, offset=i*4, datatype=PointField.FLOAT32, count=1)
                            for i,n in enumerate(('x', 'y', 'z', 'intensity'))]
             self.clock = SensorClock()
@@ -153,15 +185,17 @@ def main():
 
         def check_publishers(self):
             raw = self.count_publishers(RAW_ODOM)
-            output = self.get_publishers_info_by_topic('/odom')
-            owner = (len(output) == 1 and output[0].node_name == self.get_name()
-                     and output[0].node_namespace == self.get_namespace())
-            self.exclusive = raw == 1 and owner
+            topics = ('/odom', self.cloud_topic) if args.go2_cloud else ('/odom',)
+            publishers = {topic: self.get_publishers_info_by_topic(topic) for topic in topics}
+            self.exclusive = raw == 1 and all(len(infos) == 1 and infos[0].node_name == self.get_name()
+                                              and infos[0].node_namespace == self.get_namespace()
+                                              for infos in publishers.values())
             if not self.exclusive:
                 self.samples.clear()
                 self.pending = None
-                self.get_logger().warning('等待唯一的 %s 发布者与本节点独占 /odom；发布者数 %s/%s。'
-                                          % (RAW_ODOM, raw, len(output)), throttle_duration_sec=5.)
+                counts = {topic: len(infos) for topic, infos in publishers.items()}
+                self.get_logger().warning(f'等待唯一的本体里程计和导航传感器发布者：{RAW_ODOM}={raw}, {counts}',
+                                          throttle_duration_sec=5.)
 
         def receive_odom(self, msg):
             if not self.exclusive:
@@ -233,19 +267,26 @@ def main():
                 # Time-aligned interpolation and lever arm use the same routines as mapping.
                 world, lidar_pose = place(start, points, history, mount, RANGE_MIN, 40.)
                 pos, q = interpolate(history, np.array([start], dtype=np.int64))
-                lidar, obstacles, ranges, level_q = scan_geometry(
-                    world, np.r_[pos[0], q[0]], lidar_pose, body_height, band)
-                if not len(lidar):
+                body_pose = np.r_[pos[0], q[0]]
+                if args.go2_cloud:
+                    cloud = body_scan(world, body_pose)
+                else:
+                    cloud, obstacles, ranges, level_q = scan_geometry(
+                        world, body_pose, lidar_pose, body_height, band)
+                if not len(cloud):
                     raise ValueError('滤除机身回波后无有效点')
             except (OSError, ValueError, struct.error) as exc:
                 self.pending = None
                 self.get_logger().warning(str(exc), throttle_duration_sec=3.)
                 return
             stamp = Time(sec=start//10**9, nanosec=start%10**9)
+            if args.go2_cloud:
+                self.publish_cloud(self.cloud, stamp, 'base_link', cloud)
+                return
             self.tf.sendTransform(edge(stamp, 'base_link', SCAN_FRAME, mount[:3], level_q))
-            self.publish_cloud(self.cloud, stamp, lidar)
+            self.publish_cloud(self.cloud, stamp, sensor_frame, cloud)
             if len(obstacles):
-                self.publish_cloud(self.obstacles, stamp, obstacles)
+                self.publish_cloud(self.obstacles, stamp, sensor_frame, obstacles)
             sc = LaserScan()
             sc.header.frame_id, sc.header.stamp = SCAN_FRAME, stamp
             sc.angle_min = -math.pi
@@ -259,9 +300,9 @@ def main():
             sc.ranges = beam_data
             self.scan.publish(sc)
 
-        def publish_cloud(self, publisher, stamp, points):
+        def publish_cloud(self, publisher, stamp, frame, points):
             pc = PointCloud2()
-            pc.header.frame_id, pc.header.stamp = sensor_frame, stamp
+            pc.header.frame_id, pc.header.stamp = frame, stamp
             pc.height, pc.width, pc.fields = 1, len(points), self.fields
             pc.point_step, pc.row_step, pc.is_dense = 16, 16*len(points), True
             payload = array('B')

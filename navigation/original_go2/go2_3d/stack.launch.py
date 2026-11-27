@@ -1,0 +1,138 @@
+"""Native Go2 DDS, camera, 3D GICP; optional Nav2, with no AMCL/2D SLAM."""
+from pathlib import Path
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction, OpaqueFunction
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
+from launch_ros.actions import Node
+from launch_ros.actions import SetRemap
+from launch_ros.parameter_descriptions import ParameterValue
+
+
+def generate_launch_description():
+    mode = LaunchConfiguration('mode')
+    navigation = IfCondition(PythonExpression(["'",mode,"' == 'navigation'"]))
+    mapper_mode = PythonExpression(["'mapping' if '",mode,"' == 'mapping' else 'localization'"])
+    root = Path('/opt/go2_project')
+    config = Path('/runtime/config')
+    params = str(config/'nav2_3d.yaml')
+    whitelist = '["^/(go2_visual/live/model_mesh|tf|tf_static|odom|point_cloud2|registered_cloud|map_cloud|map|map_metadata|scan|robot_description|initialpose|goal_pose|plan|local_plan|cmd_vel.*)$","^/camera/image/compressed$","^/(localization|operator|mapping|control|navigation)/.*$","^/(local_costmap|global_costmap)/.*$"]'
+
+    def validate_backend(context):
+        if LaunchConfiguration('loop_backend').perform(context) == 'rtabmap':
+            if mode.perform(context) != 'mapping':
+                raise RuntimeError('The optional RTAB-Map backend is mapping-only; '
+                                   'localization/navigation continue using the saved optimized map')
+            if LaunchConfiguration('camera').perform(context).lower() != 'true':
+                raise RuntimeError('RTAB-Map visual loop closure requires camera input')
+            calibration = Path(LaunchConfiguration('camera_calibration').perform(context))
+            if not calibration.is_file():
+                raise RuntimeError('RTAB-Map requires a measured camera calibration file')
+        return []
+
+    def mapper_node(context):
+        parameters = [str(root/'go2_3d/gicp.yaml'), LaunchConfiguration('gicp_params'),
+                      {'mode': mapper_mode,
+                       'map_directory':'/runtime/navigation_map',
+                       'map_name': ParameterValue(LaunchConfiguration('map_name'), value_type=str),
+                       'auto_initialize': ParameterValue(LaunchConfiguration('auto_initialize'), value_type=bool),
+                       'initial_from_map_start': ParameterValue(LaunchConfiguration('initial_from_map_start'), value_type=bool),
+                       **{key: ParameterValue(LaunchConfiguration(key), value_type=float)
+                          for key in ('initial_x', 'initial_y', 'initial_z', 'initial_yaw_degrees')}}]
+        if mode.perform(context) != 'mapping':
+            # Use the indoor-verified 0.5s accumulation for patrol localization.
+            # Registration downsampling controls CPU cost separately from the
+            # complete saved PCD and from the original 1s freshness deadline.
+            parameters.append({'scan_window': 0.5})
+        remappings = []
+        if LaunchConfiguration('loop_backend').perform(context) == 'rtabmap':
+            parameters.append({'mapping_backend': 'rtabmap', 'map_frame': 'gicp_odom',
+                               'loop_closure_enabled': False})
+            remappings = [('/map_cloud', '/gicp/map_cloud'),
+                          ('/registered_cloud', '/gicp/registered_cloud'),
+                          ('/save_3d_map', '/gicp/save_unoptimized_map')]
+        return [Node(executable='/usr/bin/python3', name='go2_gicp', output='screen',
+                     arguments=[str(root/'go2_3d/mapper.py')], parameters=parameters,
+                     remappings=remappings)]
+
+    return LaunchDescription([
+        DeclareLaunchArgument('mode',default_value='mapping',choices=['mapping','localization','navigation']),
+        DeclareLaunchArgument('map_name',default_value='default'),
+        DeclareLaunchArgument('camera',default_value='true'),
+        DeclareLaunchArgument('loop_backend',default_value='lidar',choices=['lidar','rtabmap']),
+        DeclareLaunchArgument('camera_calibration',default_value=''),
+        DeclareLaunchArgument('session_directory',default_value=''),
+        DeclareLaunchArgument('gicp_params',default_value=str(root/'go2_3d/gicp.yaml')),
+        DeclareLaunchArgument('port',default_value='8765'),
+        DeclareLaunchArgument('auto_initialize',default_value='true'),
+        DeclareLaunchArgument('initial_from_map_start',default_value='true'),
+        DeclareLaunchArgument('initial_x',default_value='0.0'),
+        DeclareLaunchArgument('initial_y',default_value='0.0'),
+        DeclareLaunchArgument('initial_z',default_value='0.0'),
+        DeclareLaunchArgument('initial_yaw_degrees',default_value='0.0'),
+        DeclareLaunchArgument('topic_whitelist',default_value=whitelist),
+        DeclareLaunchArgument('capabilities',default_value='[clientPublish,services,parameters,parametersSubscribe,connectionGraph,assets]'),
+        # 10,000,000 XYZ float32 points need 120 MB per complete map frame.
+        # Legacy byte-budget bridges can hold two frames plus overhead.
+        # SDK/Rust bridges use a message-count queue instead (see capacity doc).
+        DeclareLaunchArgument('send_buffer_limit',default_value='268435456'),
+        OpaqueFunction(function=validate_backend),
+        Node(executable='/usr/bin/python3',name='go2_edu_dds_bridge',output='screen',
+             arguments=['/repo/navigation/go2_control_adapter.py'],parameters=[{'enable_control':False,
+                 'allow_motion':ParameterValue(PythonExpression(["'",mode,"' == 'navigation'"]),value_type=bool)}]),
+        Node(executable='/usr/bin/python3',name='go2_camera_sample',output='screen',
+             condition=IfCondition(LaunchConfiguration('camera')),
+             arguments=[str(root/'patches/sensors/go2_camera_sample.py')],
+             parameters=[{'sample_rate': ParameterValue(PythonExpression([
+                 "8.0 if '", LaunchConfiguration('loop_backend'), "' == 'rtabmap' else 2.0"]),
+                 value_type=float)}]),
+        Node(package='robot_state_publisher',executable='robot_state_publisher',output='screen',
+             parameters=[{'robot_description':(config/'go2_edu.urdf').read_text(),'use_sim_time':False}]),
+        OpaqueFunction(function=mapper_node),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(str(root/'go2_3d/rtabmap_backend.launch.py')),
+            condition=IfCondition(PythonExpression([
+                "'", LaunchConfiguration('loop_backend'), "' == 'rtabmap'"])),
+            launch_arguments={
+                'camera_calibration': LaunchConfiguration('camera_calibration'),
+                'session_directory': LaunchConfiguration('session_directory'),
+                'map_name': LaunchConfiguration('map_name'),
+                'gicp_params': LaunchConfiguration('gicp_params'),
+            }.items()),
+        Node(executable='/usr/bin/python3',name='go2_operator',output='screen',
+             arguments=[str(root/'go2_3d/operator_bridge.py')],parameters=[{'mode':mode}]),
+        Node(executable='/usr/bin/python3',name='go2_navigation_diagnostics',output='screen',
+             condition=navigation,arguments=[str(root/'go2_3d/navigation_diagnostics.py')]),
+        Node(package='pointcloud_to_laserscan',executable='pointcloud_to_laserscan_node',output='screen',
+             condition=navigation,remappings=[('cloud_in','/navigation/obstacle_cloud'),('scan','/scan')],
+             parameters=[{'target_frame':'base_link','min_height':-10.0,'max_height':10.0,
+                          'range_min':0.35,'range_max':20.0,'scan_time':0.1,
+                          'angle_min':-3.14159,'angle_max':3.14159,'angle_increment':0.01,
+                          'transform_tolerance':0.2,'use_inf':False,'use_sim_time':False}]),
+        Node(executable='/usr/bin/python3',name='go2_ground_obstacles',output='screen',
+             condition=navigation,arguments=[str(root/'go2_3d/obstacle_cloud.py')],
+             parameters=[{'map_directory':'/runtime/navigation_map'}]),
+        Node(executable='/usr/bin/python3',name='go2_nav2_ready',output='screen',
+             condition=navigation,arguments=[str(root/'go2_3d/nav2_ready.py')]),
+        Node(package='nav2_map_server',executable='map_server',name='map_server',output='screen',
+             condition=navigation,parameters=[params,{'yaml_filename':'/runtime/navigation_map/nav.yaml','use_sim_time':False}]),
+        Node(package='nav2_lifecycle_manager',executable='lifecycle_manager',name='lifecycle_manager_map',
+             condition=navigation,parameters=[{'autostart':True,'node_names':['map_server'],'use_sim_time':False}]),
+        # Humble's bt_navigator subscribes to goal_pose and forwards it directly
+        # to its action. Isolate this shortcut so only Operator handles clicks.
+        GroupAction(condition=navigation,actions=[
+          SetRemap(src='goal_pose',dst='/navigation/nav2_direct_goal_unused'),
+          IncludeLaunchDescription(PythonLaunchDescriptionSource(str(Path(get_package_share_directory('nav2_bringup'))/'launch/navigation_launch.py')),
+             launch_arguments={'params_file':params,'use_sim_time':'false',
+                                                   # Humble evaluates this inside PythonExpression(['not ', ...]).
+                                                   'autostart':'false','use_composition':'False'}.items()),
+        ]),
+        IncludeLaunchDescription(FrontendLaunchDescriptionSource(str(Path(get_package_share_directory('foxglove_bridge'))/'launch/foxglove_bridge_launch.xml')),
+            launch_arguments={'port': LaunchConfiguration('port'),
+                              'send_buffer_limit': LaunchConfiguration('send_buffer_limit'),
+                              'topic_whitelist': LaunchConfiguration('topic_whitelist'),
+                              'capabilities': '[clientPublish,connectionGraph,assets]',
+                              'client_topic_whitelist': '["^/(initialpose|goal_pose|control/enable|navigation/(cancel|resume|waypoint|route/command))$"]'}.items()),
+    ])

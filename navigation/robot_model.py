@@ -66,3 +66,19 @@ def publish_model(node):
 
     node.create_timer(1.0, refresh)
     node.get_logger().info(f'已发布 Go2 站姿模型 {TOPIC}，{len(triangles)} 个三角面，跟随 base_link')
+
+
+if __name__ == '__main__':
+    import rclpy
+    from rclpy.node import Node
+    rclpy.init()
+    node = Node('go2_nav_model')
+    try:
+        publish_model(node)
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()

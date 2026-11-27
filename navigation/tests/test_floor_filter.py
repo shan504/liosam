@@ -32,16 +32,16 @@ class MeasuredFloor(unittest.TestCase):
         np.testing.assert_array_equal(obstacle_mask(heights),
                                       [False, False, False, False, True, True, True, True, True, True, False, False])
 
-    def test_both_navigation_panels_show_only_filtered_pointcloud_topics(self):
+    def test_navigation_panels_take_the_original_mappers_outputs(self):
         layout = json.loads((Path(__file__).resolve().parents[1] / 'foxglove.json').read_text())
         views = [panel['topics'] for name, panel in layout['configById'].items()
                  if name.startswith('3D!')]
         self.assertEqual(len(views), 2)
         for topics in views:
-            for cloud in ('/map_cloud', '/navigation/cloud_filtered'):
+            for cloud in ('/map_cloud', '/registered_cloud'):
                 self.assertTrue(topics[cloud]['visible'])
                 self.assertIsNone(topics[cloud].get('maxValue'))
-            self.assertFalse(topics.get('/navigation/cloud', {}).get('visible', False))
+            self.assertFalse(topics.get('/point_cloud2', {}).get('visible', False))
 
     def test_floor_rays_and_occluded_cells(self):
         for origin_x, bearing in ((2., .01), (4., .21)):
