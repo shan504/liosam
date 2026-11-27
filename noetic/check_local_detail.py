@@ -21,9 +21,7 @@ def archive_check(root):
                      "INSERT INTO meta VALUES('frame','odom');")
     # Old and corrected walls, two real 6 mm-separated rims, and below-plane returns.
     pts = np.array([[1.001, 0, .1, 46], [1.007, 0, .1, 52], [1., 0., -.02, 200],
-                   [1., 0., .045, 125], [12., 0., 1., 8]], '<f4')
-    # .045 is stored slightly above nominal decimal on some NumPy versions.
-    pts[3, 2] = .04
+                   [1., 0., .08, 125], [12., 0., 1., 8], [1.3, 0., 4., 67]], '<f4')
     for idx in range(55):
         anchor = 1 if idx < 54 else 2
         stamp = SECOND*200+idx*100000000
@@ -41,16 +39,18 @@ def archive_check(root):
             else:
                 raise AssertionError('wrong live association or frame passed')
         when, a, (frames, n, vox) = w.read(stamp, {stamp}, 'odom', ID, .045)
-        assert when == stamp and frames == 30 and n == 60 and vox == 2 and len(a) == 2
-        np.testing.assert_allclose(a[:, 0], [1.001, 1.007], atol=1e-6)
-        np.testing.assert_array_equal(a[:, 3], [46, 52])
+        assert when == stamp and frames == 30 and n == 90 and vox == 3 and len(a) == 3
+        np.testing.assert_allclose(a[:, 0], [1.001, 1.007, 1.3], atol=1e-6)
+        np.testing.assert_array_equal(a[:, 3], [46, 52, 67])
         # Optimize both anchors so that no old wall should survive. Archive
         # geometry is local: rebuilding still works across map translation.
         new = (1.4, -.51, .09, 0., 0., 0., 1.)
         db.execute('UPDATE poses SET pose=?', (json.dumps(new),))
         db.commit()
         _, b, _ = w.read(stamp, {stamp}, 'odom', ID, .045)
-        # The two formerly below-band returns now lie above ground: valid behavior.
+        # Loop correction moved the 8 cm return above the threshold, while
+        # the original below-ground return still lies below 10 cm.
+        assert set(b[:, 3]) == {46, 52, 67, 125}
         assert np.all(b[:, 0] > 2.39)
         kept = b[np.isin(b[:, 3], [46, 52])]
         np.testing.assert_allclose(kept[:, 0], [2.401, 2.407], atol=1e-6)
@@ -86,12 +86,13 @@ def performance():
 
 
 def fallback():
-    x = np.array([[1., 3., -.1, 9.], [0., 0., 0., 10.], [.4, 2., .04, 11.], [.01, .02, .06, 12.]], '>f4')
+    x = np.array([[1., 3., -.1, 9.], [0., 0., .09, 10.], [.4, 2., .1, 11.], [.01, .02, 4., 12.]], '>f4')
     msg = S(header=S(frame_id='/go2_ground'), is_bigendian=True, point_step=16, row_step=36,
             fields=[S(name=name, offset=i*4, datatype=7, count=1)
                     for i, name in enumerate(['x', 'y', 'z', 'intensity'])],
             height=2, width=2, data=x[:2].tobytes()+b'    '+x[2:].tobytes()+b'    ')
-    np.testing.assert_array_equal(d.single_xyzi(msg, .045), x[-1:])
+    np.testing.assert_array_equal(d.single_xyzi(msg, .045), x[2:])
+    np.testing.assert_array_equal(d.single_xyzi(msg, .25), x[-1:])
     print("PASS. Single-scan fallback respects the same floor threshold and retains the measured XYZI.")
 
 

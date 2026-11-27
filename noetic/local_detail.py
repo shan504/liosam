@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import socket
 import sqlite3
+import sys
 import threading
 import time
 import xmlrpc.client
@@ -13,6 +14,8 @@ from urllib.parse import urlparse
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'navigation'))
+from obstacle_view import obstacle_mask
 from dense_map import cell_ids, geometry, hashes
 
 GLOBAL = "/go2_visual/dense_map"
@@ -48,13 +51,18 @@ def choose(candidates, capacity, dist2, k):
     return candidates[np.argpartition(priority, capacity-1)[:capacity]]
 
 
+def detail_mask(heights, ground_band):
+    # Keep any stricter private detail setting on top of the common floor filter.
+    return obstacle_mask(heights) & (heights >= ground_band)
+
+
 def local_cloud(clouds, center, ground_band, limit=CAP):
     chunks = []
     for p in clouds:
         delta = p[:, :3]-center
         d2 = np.einsum('ij,ij->i', delta, delta)
         inside = np.isfinite(d2) & (d2 <= RADIUS**2)
-        inside &= p[:, 2] > ground_band
+        inside &= detail_mask(p[:, 2], ground_band)
         if inside.any():
             chunks.append(p[inside])
     if not chunks:
@@ -149,7 +157,7 @@ def single_xyzi(msg, band):
             out[:, i] = np.ndarray((msg.height, msg.width), dtype, buffer=msg.data, offset=f.offset,
                                    strides=(msg.row_step, msg.point_step)).reshape(-1)
     valid = np.isfinite(out[:, :3]).all(axis=1)
-    valid &= out[:, 2] > band
+    valid &= detail_mask(out[:, 2], band)
     return out[valid]
 
 
@@ -248,7 +256,7 @@ class Worker:
         path = None
         window = None
         next_check = 0.
-        band = .045
+        band = 0.
         try:
             while not rospy.is_shutdown():
                 if self.pub.get_num_connections() == 0:
@@ -270,7 +278,7 @@ class Worker:
                                 window.close()
                             path, window = None, None
                             raise
-                        band = float(rospy.get_param('~local_ground_band', .045))
+                        band = float(rospy.get_param('~local_ground_band', 0.))
                         if not np.isfinite(band) or band < 0:
                             raise ValueError('无效的贴地筛选参数')
                         if path != actual or window is None:

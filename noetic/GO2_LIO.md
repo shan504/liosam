@@ -2,6 +2,8 @@
 
 在机器人终端执行 `bash ~/go2-detail/noetic/start.sh --go2`。每次启动会创建单独的地图归档。沿用 Foxglove 的 farm_live_detail 布局，在电脑上连接终端打印的 Wi-Fi 地址。右侧图像话题为 `/camera/image/compressed`，D435i RGB 只用于显示。
 
+地面锁定后，三维建图 `/go2_visual/ground/dense_map`、实时扫描 `/go2_visual/ground/scan` 和局部细节 `/go2_visual/detail/local` 都从标定地面上方 10 cm 开始显示，墙面上部、横梁等高处回波随原始量程显示。配准、地面标定和 PCD 导出使用完整数据，后续导航用地面回波生成可通行栅格。
+
 1. Go2 站稳。终端应出现“已接通 Go2 原生里程计”和“已按扫描时间将 Go2 本体位姿用作 LIO-SAM 建图初值”。预测节点按特征帧时间查找原始 Livox 帧名，通过本体位姿插值和安装外参得到雷达位姿，然后把初值交给原有的 LIO-SAM 地图优化节点。MID-360S 的 IMU 用于旋转去畸变。启动程序只运行工作区现有的三个 LIO-SAM 可执行文件。
 2. 若提示缺少安装外参，另开终端运行 `python3 ~/go2-detail/noetic/mount_setup.py`。工具可从本机工作区已展开的实机 URDF 提取固定变换，或接受实测的机身到雷达 XYZ（米）与 RPY（度）。选定的标定保存在 `~/.config/go2/body_from_lidar.json`，当前建图会自动重试。如果已有实机 URDF，也可在启动前设置 `GO2_ROBOT_URDF`。D435i 与雷达之间的标定还需要对应的相机到机身变换，0.50 米只表示雷达离地高度。
 3. 等“地面已锁定”后，用原来的遥控方式向前走几米，再停稳。在另一终端执行 `bash ~/go2-detail/noetic/start.sh --check-stop`，保持静止 10 秒。它会报告本体、地图中的模型和 LIO 位姿相对停稳首帧的最大位移与转角，以及同时刻雷达预测与配准的距离。还应在 Foxglove 观察同一墙角或立柱有无重影。回环测试另需重访先前地点，短距离走停只能验证局部稳定性。

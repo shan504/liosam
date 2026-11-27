@@ -37,7 +37,8 @@ fi
 if [[ $mode == check ]]; then
     exec /usr/bin/python3 -u "$here/check_stop.py"
 fi
-files=("$HOME/go2_model_live.pyz" "$here/dense_map.py" "$here/bridge_topics.json" "$here/foxglove_endpoint.py")
+files=("$HOME/go2_model_live.pyz" "$here/dense_map.py" "$here/bridge_topics.json" "$here/foxglove_endpoint.py"
+       "$here/../navigation/obstacle_view.py")
 if [[ $mode == native || $mode == go2 ]]; then
     files+=("$here/native_odom.sh" "$here/native_odom.py" "$here/native_sensor_clock.py"
             "$here/native_model.py" "$here/native_cloud.py" "$here/native_mount.py" "$here/native_inspect_tf.py" "$here/check_returns.py")
@@ -47,6 +48,7 @@ if [[ $mode == go2 ]]; then
 fi
 if [[ $mode != native ]]; then
     files+=("$here/live_detail.sh" "$here/local_detail.py" "$here/motion_watch.py" "$here/model_tf.py"
+            "$here/mapping_obstacles.py"
             "$HOME/go2_farm_ground/start_ground.sh")
     lio_share=$(rospack find lio_sam)
     files+=("$lio_share/config/paramsLivoxIMU.yaml")
@@ -104,7 +106,7 @@ if graph is not None:
     nodes = {node for group in graph for _, group_nodes in group for node in group_nodes}
     expected = set(sys.argv[1].split()) | {
         "/mid360s_imu_units", "/mid360s_attitude", "/go2_l1_style_dense",
-        "/go2_ground_view", "/go2_live_model_view", "/go2_visual_model",
+        "/go2_ground_view", "/go2_mapping_obstacles", "/go2_live_model_view", "/go2_visual_model",
         "/go2_native_odom_bridge", "/go2_native_cloud", "/go2_native_model",
         "/go2_native_lio_seed", "/go2_d435_display",
     }
@@ -113,6 +115,7 @@ if graph is not None:
         "/lio_sam/mapping/odometry", "/lio_sam/mapping/cloud_registered_raw",
         "/go2_native/odometry", "/go2_native/registered_scan",
         "/go2_visual/dense_map", "/go2_visual/ground/dense_map",
+        "/go2_visual/ground_full/scan", "/go2_visual/ground_full/dense_map",
         "/go2_visual/ground/scan", "/go2_visual/live/model_mesh",
     }
     expected.update(node for topic, publishers in graph[0] if topic in topics for node in publishers)
@@ -435,7 +438,10 @@ else
 fi
 wait_topic /lio_sam/mapping/odometry/header
 
-start E_ground /bin/bash "$HOME/go2_farm_ground/start_ground.sh" --height 0.50
+start E_obstacles /usr/bin/python3 -u "$here/mapping_obstacles.py"
+start E_ground /bin/bash "$HOME/go2_farm_ground/start_ground.sh" --height 0.50 \
+    /go2_visual/ground/scan:=/go2_visual/ground_full/scan \
+    /go2_visual/ground/dense_map:=/go2_visual/ground_full/dense_map
 start F_dense /usr/bin/python3 -u "$here/dense_map.py" \
     "_archive_dir:=$run_dir/dense" _voxel:=0.015 _fine_voxel:=0.0075 _max_points:=450000 _scan_period:=0.09 _period:=3.5
 if [[ $mode == go2 ]]; then

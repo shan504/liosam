@@ -16,6 +16,7 @@ DESKEW = '/lio_sam/deskew/cloud_deskewed'
 RAW = '/livox/lidar'
 REG = '/lio_sam/mapping/cloud_registered_raw'
 SCAN = '/go2_visual/ground/scan'
+FULL_SCAN = '/go2_visual/ground_full/scan'
 LOCAL = '/go2_visual/detail/local'
 MODEL = '/go2_visual/live/model_mesh'
 IMU = '/mid360s/imu_filtered'
@@ -118,10 +119,11 @@ def quat_angle(a, b):
     return math.degrees(2*math.acos(float(np.clip(abs(a@b)/(np.linalg.norm(a)*np.linalg.norm(b)), 0, 1))))
 
 
-def show_stream(topic, rows):
+def show_stream(topic, rows, source_topic=None):
     import numpy as np
+    label = source_topic or topic
     if not rows:
-        print(topic, '本窗口无消息')
+        print(label, '本窗口无消息')
         return
     owners = sorted(set(r.owner for r in rows))
     frames = sorted(set(r.frame for r in rows))
@@ -129,7 +131,7 @@ def show_stream(topic, rows):
     dt = np.diff(stamps)/1e6
     wall = np.diff([r.arrival for r in rows])*1000
     print('%s n=%d pub=%s frame=%s stamp_ns=%d..%d' %
-          (topic, len(rows), ','.join(owners), ','.join(frames), stamps[0], stamps[-1]))
+          (label, len(rows), ','.join(owners), ','.join(frames), stamps[0], stamps[-1]))
     if len(dt):
         print('  源戳间隔 中位/最大 %.1f/%.1f ms，到达最大间隔 %.1f ms；重复/倒序 %d/%d' %
               (np.median(dt), max(dt), max(wall), len(stamps)-len(set(stamps)), sum(dt < 0)))
@@ -395,12 +397,18 @@ def run(seconds):
             with lock:
                 issues[(topic, str(exc))] += 1
 
+    _, _, graph = master.getSystemState('/go2_alignment_probe')
+    publishers = dict(graph[0])
+    # Compare every point before display filtering. Older running stacks publish
+    # the full levelled scan on the original topic.
+    use_full = bool(publishers.get(FULL_SCAN) or '/go2_mapping_obstacles' in publishers.get(SCAN, ()))
+    scan_input = FULL_SCAN if use_full else SCAN
     for topic, typ in [(n, rospy.AnyMsg) for n in TYPES]+[(ODOM, Odometry), (INC, Odometry), (IMU, Imu),
                                                           ('/rosout_agg', Log), ('/tf', TFMessage), ('/tf_static', TFMessage)]:
         cap = 3 if topic in TYPES else 100
-        subscriptions.append(rospy.Subscriber(topic, typ, callback, callback_args=topic, queue_size=cap,
+        subscriptions.append(rospy.Subscriber(scan_input if topic == SCAN else topic,
+                                              typ, callback, callback_args=topic, queue_size=cap,
                                               buff_size=8*1024**2 if topic in TYPES else 65536))
-    _, _, graph = master.getSystemState('/go2_alignment_probe')
     print('显示细节层 %s 发布者=%s，订阅者=%s（只查注册表）。' %
           (LOCAL, dict(graph[0]).get(LOCAL, []), dict(graph[1]).get(LOCAL, [])))
     print('保持静止。现在同时记录 %.1f 秒；只读取现有话题与 TF。' % seconds, flush=True)
@@ -429,7 +437,7 @@ def run(seconds):
             return None
     print('=== ALIGNMENT BEGIN ===')
     for topic in (RAW, IMU, ODOM, INC, DESKEW, REG, SCAN, MODEL):
-        show_stream(topic, data[topic])
+        show_stream(topic, data[topic], scan_input if topic == SCAN else topic)
     if data[INC]:
         flags = Counter(float(r.value[2]) for r in data[INC])
         print('增量校正 pose.covariance[0] 退化标记 1：%d/%d；实际取值 %s' %

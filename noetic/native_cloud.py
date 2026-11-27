@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import struct
+import sys
 from threading import Lock
 
 import numpy as np
@@ -13,6 +14,9 @@ from check_returns import wire_points
 from dense_map import decode, geometry
 from native_mount import TOPICS as MOUNT_TOPICS
 from native_inspect_tf import StaticTF, resolve
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'navigation'))
+from obstacle_view import obstacle_mask
 
 WORLD = "go2_native/odom"
 BODY = "go2_native/base_link"
@@ -95,7 +99,8 @@ def project_ground(points, static_pose, band):
         out[:, :3] += t
     else:
         out[:, :3] = points[:, :3] @ r.T + t
-    return out[out[:, 2] > band]
+    heights = out[:, 2]
+    return out[obstacle_mask(heights) & (heights >= band)]
 
 
 def main():
@@ -109,7 +114,7 @@ def main():
     from tf2_msgs.msg import TFMessage
 
     rospy.init_node("go2_native_cloud")
-    band = float(rospy.get_param("~ground_band", .045))
+    band = float(rospy.get_param("~ground_band", 0.))
     near = float(rospy.get_param("~min_range", .1))
     far = float(rospy.get_param("~max_range", 40.))
     if not (np.isfinite([band, near, far]).all() and 0 <= band and 0 <= near < far):
