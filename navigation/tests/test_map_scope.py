@@ -11,6 +11,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from prepare_map import prepare
 from select_map import select
+from gicp_localizer import map_display_points
 
 
 def make_bundle(root, name, center, radius):
@@ -22,7 +23,11 @@ def make_bundle(root, name, center, radius):
     floor = wall.copy()
     floor[:, :2] = (xy - center) * .5 + center
     floor[:, 2] = 0
-    scan = np.concatenate((floor, wall)).astype('<f4')
+    # The two wall samples share a 10 cm registration voxel, but land in
+    # distinct 4 cm display voxels. All archive rotations here are identity.
+    contours = [[4.01, 4.02, .35, 1.], [4.06, 4.02, .35, 1.]]
+    vertical_returns = [[4., 5., -.3, 1.], [4., 5., .07, 1.], [4., 5., 2.65, 1.], [4., 5., 4., 1.]]
+    scan = np.concatenate((floor, wall, contours, vertical_returns)).astype('<f4')
     n = len(scan)
     pcd = version / (name + '.pcd')
     header = ('VERSION .7\nFIELDS x y z intensity\nSIZE 4 4 4 4\nTYPE F F F F\n'
@@ -60,6 +65,16 @@ class MapScope(unittest.TestCase):
                 caches.append(cache)
                 data = json.loads((cache/'metadata.json').read_text())
                 np.testing.assert_allclose(data['initial_base_pose'][:3], [center-.1, 0., .32])
+                target = np.load(cache / 'target.npy')
+                self.assertTrue((target[:, 2] == 0.).any())
+                obstacles = np.load(cache / 'obstacles.npy')
+                self.assertGreater(len(obstacles), 0)
+                np.testing.assert_allclose(np.unique(obstacles[:, 2]), [.35, 2.65, 4.])
+                np.testing.assert_allclose(map_display_points(obstacles), obstacles)
+                def detail_x(cloud):
+                    return np.sort(cloud[np.isclose(cloud[:, 1], 4.02), 0])
+                np.testing.assert_allclose(detail_x(obstacles), [4.01, 4.06])
+                self.assertEqual(len(detail_x(target)), 1)
                 self.assertEqual(prepare(selected, root/'cache'), cache)
             self.assertNotEqual(caches[0], caches[1])
             self.assertNotEqual((caches[0]/'nav.pgm').read_bytes(), (caches[1]/'nav.pgm').read_bytes())

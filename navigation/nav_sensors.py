@@ -18,7 +18,6 @@ from dense_map import transform
 from native_cloud import calibration, compose_rotation, interpolate, place
 from native_odom import read_sample, validated
 from native_sensor_clock import SensorClock
-from prepare_map import is_floor
 
 RAW_ODOM = '/utlidar/robot_odom'
 SCAN_FRAME = 'go2_nav_scan'
@@ -82,7 +81,7 @@ def scan_geometry(world, body_pose, lidar_pose, body_height, band=(.085, .85)):
     obstacle_rows = np.flatnonzero(obstacle)[ok][nearest][first]
     ranges[~np.isfinite(ranges)] = np.nan  # Missing returns cannot assert clear space.
     inverse_body = body_pose[3:] * np.array([-1, -1, -1, 1])
-    return (lidar, ~is_floor(heights), lidar[obstacle_rows], ranges.astype(np.float32, copy=False),
+    return (lidar, lidar[obstacle_rows], ranges.astype(np.float32, copy=False),
             compose_rotation(inverse_body, q_level))
 
 
@@ -133,7 +132,6 @@ def main():
             super().__init__('go2_navigation_sensors')
             self.odom = self.create_publisher(Odometry, '/odom', 10)
             self.cloud = self.create_publisher(PointCloud2, '/navigation/cloud', sensor_qos)
-            self.display_cloud = self.create_publisher(PointCloud2, '/navigation/cloud_filtered', sensor_qos)
             self.obstacles = self.create_publisher(PointCloud2, '/navigation/obstacles', 5)
             self.scan = self.create_publisher(LaserScan, '/navigation/scan', sensor_qos)
             self.tf = TransformBroadcaster(self)
@@ -235,7 +233,7 @@ def main():
                 # Time-aligned interpolation and lever arm use the same routines as mapping.
                 world, lidar_pose = place(start, points, history, mount, RANGE_MIN, 40.)
                 pos, q = interpolate(history, np.array([start], dtype=np.int64))
-                lidar, visible, obstacles, ranges, level_q = scan_geometry(
+                lidar, obstacles, ranges, level_q = scan_geometry(
                     world, np.r_[pos[0], q[0]], lidar_pose, body_height, band)
                 if not len(lidar):
                     raise ValueError('滤除机身回波后无有效点')
@@ -246,8 +244,6 @@ def main():
             stamp = Time(sec=start//10**9, nanosec=start%10**9)
             self.tf.sendTransform(edge(stamp, 'base_link', SCAN_FRAME, mount[:3], level_q))
             self.publish_cloud(self.cloud, stamp, lidar)
-            if self.display_cloud.get_subscription_count():
-                self.publish_cloud(self.display_cloud, stamp, lidar[visible])
             if len(obstacles):
                 self.publish_cloud(self.obstacles, stamp, obstacles)
             sc = LaserScan()

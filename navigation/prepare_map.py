@@ -11,9 +11,12 @@ import tempfile
 import sys
 
 import numpy as np
+from obstacle_view import obstacle_mask
 
 RESOLUTION = 0.05
 VOXEL = 0.10
+DISPLAY_VOXEL = 0.04
+MAX_DISPLAY_POINTS = 160_000
 FLOOR_TOLERANCE = 0.045
 OBSTACLE_MIN_HEIGHT = 0.085
 OBSTACLE_MAX_HEIGHT = 0.85
@@ -127,8 +130,18 @@ def apply(points, matrix):
     return np.asarray(points[:, :3], dtype=np.float64) @ matrix[:3, :3].T + matrix[:3, 3]
 
 
-def target_and_bounds(cloud, ground):
+def add_display_voxels(samples, xyz, rows, voxel):
+    # Byte keys keep all three signed cell indices, including distant map origins.
+    cells = np.ascontiguousarray(np.floor(xyz / voxel), dtype=np.int32)
+    keys = cells.view(np.dtype((np.void, 3 * cells.itemsize))).reshape(-1)
+    unique, first = np.unique(keys, return_index=True)
+    samples.update(zip(unique.tolist(), rows[first].tolist()))
+
+
+def survey_clouds(cloud, ground):
     sample_indices = {}
+    display_indices = {}
+    display_voxel = DISPLAY_VOXEL
     lower, upper = np.full(2, np.inf), np.full(2, -np.inf)
     for start in range(0, len(cloud), 131072):
         xyz = apply(cloud[start:start+131072], ground)
@@ -142,10 +155,22 @@ def target_and_bounds(cloud, ground):
         sample_indices.update(zip(unique.tolist(), (ids + start).tolist()))
         if len(sample_indices) > MAX_VOXELS:
             raise ValueError('10 cm 配准目标过大，超出本机地图准备预算')
+        rows = np.flatnonzero(obstacle_mask(xyz[:, 2]))
+        add_display_voxels(display_indices, xyz[rows], rows + start, display_voxel)
+        while len(display_indices) > MAX_DISPLAY_POINTS:
+            # Doubling gives nested cells. One real return per child voxel
+            # suffices to cover every occupied parent, including old map regions.
+            display_voxel *= 2
+            keep = np.sort(np.fromiter(display_indices.values(), dtype=np.int64))
+            display_indices.clear()
+            add_display_voxels(display_indices, apply(cloud[keep], ground), keep, display_voxel)
     samples = np.fromiter(sample_indices.values(), dtype=np.int64, count=len(sample_indices))
     if len(samples) < 30:
         raise ValueError('GICP 目标有效体素不足 30 个')
-    return apply(cloud[np.sort(samples)], ground).astype('f4'), lower, upper
+    display_rows = np.sort(np.fromiter(display_indices.values(), dtype=np.int64))
+    target = apply(cloud[np.sort(samples)], ground).astype('<f4')
+    display = apply(cloud[display_rows], ground).astype('<f4')
+    return target, lower, upper, display, display_voxel
 
 
 def observe(grid, xy, lower_cell, height_only):
@@ -208,8 +233,8 @@ def build(version, dest, layout):
     if not poses:
         raise ValueError('缺少已优化的关键帧位姿')
     initial = poses[min(poses)] @ np.linalg.inv(mount)
-    print('正在构建 10 cm GICP 目标和 5 cm 已观测通行栅格……', file=sys.stderr, flush=True)
-    target, lower, upper = target_and_bounds(cloud, ground)
+    print('正在从存档点云生成障碍物显示层、10 cm GICP 目标和 5 cm 通行栅格……', file=sys.stderr, flush=True)
+    target, lower, upper, display, display_voxel = survey_clouds(cloud, ground)
     lidar_xy = np.asarray([pose[:2, 3] for pose in poses.values()])
     lower = np.floor(np.minimum(lower, lidar_xy.min(axis=0)) / RESOLUTION).astype(np.int64) - 2
     upper = np.floor(np.maximum(upper, lidar_xy.max(axis=0)) / RESOLUTION).astype(np.int64) + 2
@@ -251,6 +276,7 @@ def build(version, dest, layout):
         'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n'
         % (RESOLUTION, lower[0]*RESOLUTION, lower[1]*RESOLUTION))
     np.save(dest / 'target.npy', target, allow_pickle=False)
+    np.save(dest / 'obstacles.npy', display, allow_pickle=False)
     metadata = dict(map_frame='map', map_axes='saved go2_ground', sensor_frame=sensor,
                     source_frame=source_frame, map_from_source=ground.tolist(),
                     body_from_lidar=mount.tolist(), initial_map_from_body=initial.tolist(),
@@ -258,6 +284,7 @@ def build(version, dest, layout):
                     grid_resolution=RESOLUTION, voxel_size=VOXEL, scans=n_scans, exact_origin_scans=exact,
                     floor_band_m=[-FLOOR_TOLERANCE, FLOOR_TOLERANCE],
                     obstacle_band_m=[OBSTACLE_MIN_HEIGHT, OBSTACLE_MAX_HEIGHT],
+                    display_voxel_m=display_voxel, display_points=len(display),
                     target_points=len(target), source_version=str(version))
     (dest / 'metadata.json').write_text(json.dumps(metadata, allow_nan=False, indent=2)+'\n')
 
@@ -273,6 +300,7 @@ def prepare(version, cache):
     names = layout + ['manifest.json', 'calibration/floor.json', 'live/reference_transforms.json',
                       'live/body_from_lidar.json', 'calibration/body_from_lidar.json']
     key = hashlib.sha256(Path(__file__).read_bytes() + str(version).encode())
+    key.update(Path(__file__).with_name('obstacle_view.py').read_bytes())
     checksums = version / 'SHA256SUMS'
     if checksums.is_file():
         key.update(checksums.read_bytes())
@@ -285,7 +313,7 @@ def prepare(version, cache):
     with (cache / '.prepare.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if output.exists():
-            if not all((output / name).is_file() for name in ('nav.yaml', 'nav.pgm', 'target.npy', 'metadata.json')):
+            if not all((output / name).is_file() for name in ('nav.yaml', 'nav.pgm', 'target.npy', 'obstacles.npy', 'metadata.json')):
                 raise ValueError('导航缓存不完整: ' + str(output))
             return output
         with tempfile.TemporaryDirectory(dir=str(cache), prefix='.preparing-') as tmp:

@@ -10,6 +10,8 @@ NAVIGATION = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(NAVIGATION))
 from nav_sensors import scan_geometry
 from dense_map import transform
+from gicp_localizer import live_display_points, map_display_points
+from prepare_map import apply, rigid
 
 
 class Mid360Observations(unittest.TestCase):
@@ -23,9 +25,8 @@ class Mid360Observations(unittest.TestCase):
                                   [0, 1.5, .55, 4], [.9, 1, 1.9, 5]], dtype=np.float32)
                 world = local.copy()
                 world[:, :3] += [x, y, floor]
-                raw, visible, obstacles, ranges, _ = scan_geometry(world, body, lidar, .33)
+                raw, obstacles, ranges, _ = scan_geometry(world, body, lidar, .33)
                 np.testing.assert_array_equal(raw[:, 3], [1, 2, 3, 4, 5])
-                np.testing.assert_array_equal(raw[visible, 3], [2, 3, 4, 5])
                 physical = transform(obstacles, lidar)
                 np.testing.assert_allclose(physical[physical[:, 3].argsort()], world[[1, 3]], atol=1.e-5)
                 self.assertEqual(np.isfinite(ranges).sum(), 2)
@@ -35,11 +36,35 @@ class Mid360Observations(unittest.TestCase):
         body = np.array([0., 0., .33, 0., 0., 0., 1.])
         lidar = np.array([.2, 0., .58, 0., 0., 0., 1.])
         floor = np.array([[1., -1., 0., 1], [1., 1., .01, 2]], dtype=np.float32)
-        raw, visible, obstacles, ranges, _ = scan_geometry(floor, body, lidar, .33)
+        raw, obstacles, ranges, _ = scan_geometry(floor, body, lidar, .33)
         self.assertEqual(len(raw), 2)
-        self.assertFalse(visible.any())
         self.assertEqual(obstacles.shape, (0, 4))
         self.assertTrue(np.isnan(ranges).all())
+
+    def test_live_and_saved_obstacle_views_agree_at_two_sensor_poses(self):
+        # Several hits at one bearing describe an object contour. The display
+        # preserves all of them, including returns outside GICP's matching range.
+        xyz = np.array([[0., 0., 0.], [.5, 0., .25], [2., 0., .55], [18., 0., 1.4],
+                        [1., -1., 4.], [12., 2., -.35], [1., .2, .09]])
+        for y, pitch in [(0., .52), (2.5, -.18)]:
+            with self.subTest(y=y, pitch=pitch):
+                xyz_map = xyz + [0., y, 0.]
+                pose = rigid([.21, y, .55], [0., math.sin(pitch/2), 0., math.cos(pitch/2)])
+                sensor = np.column_stack([apply(xyz_map, np.linalg.inv(pose)), np.arange(len(xyz))])
+                display = live_display_points(sensor, pose)
+                np.testing.assert_allclose(display[:, :3], map_display_points(xyz_map), atol=2e-6)
+                np.testing.assert_array_equal(display[:, 3], [1, 2, 3, 4])
+                self.assertEqual(live_display_points(sensor[[0, 5, 6]], pose).shape, (0, 4))
+
+    def test_low_obstacle_is_still_marked_even_below_display_band(self):
+        body = np.array([0., 0., .33, 0., 0., 0., 1.])
+        lidar = np.array([.2, 0., .58, 0., 0., 0., 1.])
+        block = np.array([[1., 0., .09, 7]], dtype=np.float32)
+        raw, obstacles, ranges, _ = scan_geometry(block, body, lidar, .33)
+        self.assertEqual(len(map_display_points(block[:, :3])), 0)
+        self.assertEqual(len(raw), 1)
+        np.testing.assert_array_equal(obstacles[:, 3], [7])
+        self.assertEqual(np.isfinite(ranges).sum(), 1)
 
     def test_nav2_uses_sensor_frame_endpoints_and_monitors_freshness(self):
         layer = yaml.safe_load((NAVIGATION / 'nav2.yaml').read_text())[

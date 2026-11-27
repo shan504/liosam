@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Humble scan-to-map GICP anchored by native odometry at the MID-360S scan stamp."""
 import argparse
+from array import array
 from collections import deque
 import json
 import math
@@ -9,7 +10,8 @@ import threading
 import time
 
 import numpy as np
-from prepare_map import is_floor, quaternion, rigid
+from obstacle_view import obstacle_mask
+from prepare_map import quaternion, rigid
 
 LASER_TOPIC = '/navigation/cloud'
 MAX_SCAN_AGE = 1.0
@@ -53,10 +55,22 @@ def rotation_z(angle):
 
 
 def map_display_points(points):
-    # Matcher.prior is in the saved map's level, floor-calibrated coordinates.
-    rows = np.flatnonzero(~is_floor(points[:, 2]))
+    # The saved display cloud is levelled relative to this map's measured floor.
+    rows = np.flatnonzero(obstacle_mask(points[:, 2]))
     step = max(1, math.ceil(len(rows)/160000))
     return np.ascontiguousarray(points[rows[::step]], dtype='<f4')
+
+
+def live_display_points(points, map_from_lidar):
+    """Return measured obstacle points in the level map, preserving optional intensity."""
+    xyz = points[:, :3]
+    valid = np.isfinite(xyz).all(axis=1)
+    points = points[valid]
+    xyz = points[:, :3] @ map_from_lidar[:3, :3].T + map_from_lidar[:3, 3]
+    keep = obstacle_mask(xyz[:, 2])
+    result = np.array(points[keep], dtype='<f4', copy=True)
+    result[:, :3] = xyz[keep]
+    return result
 
 
 def planar(body):
@@ -91,19 +105,28 @@ def blend_at_body(guess, match, weight):
     return result
 
 
-def cloud_points(msg):
+def read_scan(msg):
     names = {f.name: f for f in msg.fields}
     endian = '>' if msg.is_bigendian else '<'
     coords = []
     if msg.width <= 0 or msg.height <= 0:
         raise ValueError('empty scan')
-    for name in ('x', 'y', 'z'):
+    fields = ['x', 'y', 'z']
+    intensity = names.get('intensity')
+    if (intensity and intensity.datatype == 7 and intensity.count == 1
+            and intensity.offset + 4 <= msg.point_step):
+        fields.append('intensity')
+    for name in fields:
         f = names.get(name)
         if not f or f.datatype != 7 or f.count != 1 or f.offset + 4 > msg.point_step:
             raise ValueError('MID-360S cloud requires float32 x,y,z')
         coords.append(np.ndarray((msg.height, msg.width), dtype=endian+'f4', buffer=msg.data,
                                  offset=f.offset, strides=(msg.row_step, msg.point_step)).ravel())
-    xyz = np.column_stack(coords)
+    return np.column_stack(coords)
+
+
+def matching_points(scan):
+    xyz = scan[:, :3]
     dist2 = np.einsum('ij,ij->i', xyz, xyz)
     return xyz[np.isfinite(xyz).all(axis=1) & (dist2 > 0.8**2) & (dist2 < 14.**2)]
 
@@ -217,6 +240,9 @@ def main():
             retained = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                                   reliability=ReliabilityPolicy.RELIABLE)
             self.map_pub = self.create_publisher(PointCloud2, '/map_cloud', retained)
+            self.scan_view = self.create_publisher(PointCloud2, '/navigation/cloud_filtered', qos_profile_sensor_data)
+            self.scan_view_active = False
+            self.obstacle_file = directory / 'obstacles.npy'
             self.display_points = None
             self.map_shown = False
             self.map_subscribers = 0
@@ -239,17 +265,25 @@ def main():
             if not subscribers or (self.map_shown and not joined and time.monotonic()-self.last_map_publish < 15):
                 return
             if self.display_points is None:
-                self.display_points = map_display_points(np.asarray(self.matcher.prior.points))
-            points = self.display_points
-            msg = PointCloud2()
-            msg.header.frame_id, msg.header.stamp = 'map', self.get_clock().now().to_msg()
-            msg.height, msg.width = 1, len(points)
-            msg.fields = [PointField(name=k, offset=4*i, datatype=PointField.FLOAT32, count=1)
-                          for i,k in enumerate('xyz')]
-            msg.point_step, msg.row_step, msg.is_dense = 12, points.nbytes, True
-            msg.data = points.tobytes()
-            self.map_pub.publish(msg)
+                points = np.load(self.obstacle_file, mmap_mode='r', allow_pickle=False)
+                if points.ndim != 2 or points.shape[1] != 3 or not np.isfinite(points).all():
+                    raise ValueError('obstacles.npy must contain finite map-frame XYZ')
+                self.display_points = map_display_points(points)
+            self.publish_view(self.map_pub, self.display_points, self.get_clock().now().to_msg())
             self.map_shown, self.last_map_publish = True, time.monotonic()
+
+        def publish_view(self, publisher, points, stamp):
+            msg = PointCloud2()
+            msg.header.frame_id, msg.header.stamp = 'map', stamp
+            msg.height, msg.width = 1, len(points)
+            names = ('x', 'y', 'z', 'intensity')[:points.shape[1]]
+            msg.fields = [PointField(name=k, offset=4*i, datatype=PointField.FLOAT32, count=1)
+                          for i,k in enumerate(names)]
+            msg.point_step, msg.row_step, msg.is_dense = 4*len(names), points.nbytes, True
+            payload = array('B')
+            payload.frombytes(points.tobytes())
+            msg.data = payload
+            publisher.publish(msg)
 
         def on_odom(self, msg):
             if msg.header.frame_id != 'odom' or msg.child_frame_id != 'base_link':
@@ -342,7 +376,8 @@ def main():
                         guess[2, 3] = self.start_pose[2, 3]
                         guess[:3, :3] = rotation_z(yaw(guess)-yaw(odom_body)) @ odom_body[:3, :3]
             try:
-                xyz = cloud_points(msg)
+                scan = read_scan(msg)
+                xyz = matching_points(scan)
                 match, fitness, rmse = self.matcher.align(
                     xyz @ body_laser[:3, :3].T + body_laser[:3, 3], guess, tracking)
                 if not -.1 <= (self.now_ns()-ns)*1e-9 <= MAX_SCAN_AGE:
@@ -371,6 +406,12 @@ def main():
                 self.last_accept_mono = time.monotonic()
                 self.candidate, self.confirmed = None, 0
                 self.reason = 'GICP fitness=%.2f RMSE=%.3fm' % (fitness, rmse)
+            if self.scan_view.get_subscription_count():
+                points = live_display_points(scan, match @ body_laser)
+                with self.lock:
+                    if gen == self.generation and self.current(self.now_ns(), time.monotonic()):
+                        self.publish_view(self.scan_view, points, msg.header.stamp)
+                        self.scan_view_active = bool(len(points))
 
         def health(self):
             ns, mono = self.now_ns(), time.monotonic()
@@ -384,6 +425,9 @@ def main():
                 if not valid and self.last_good:
                     why = self.reason = '扫描或本体里程计过期，等待连续配准确认'
                     self.last_good = 0
+                if not valid and self.scan_view_active:
+                    self.publish_view(self.scan_view, np.empty((0, 4), dtype='<f4'), self.get_clock().now().to_msg())
+                    self.scan_view_active = False
             self.health_pub.publish(Bool(data=valid))
             if mono - self.status_time >= .5:
                 self.status_pub.publish(String(data=('定位有效 | ' if valid else '定位未确认 | ') + why))

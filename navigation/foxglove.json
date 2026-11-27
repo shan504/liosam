@@ -54,7 +54,8 @@
           "colorMode": "colormap",
           "colorField": "z",
           "colorMap": "turbo",
-          "decayTime": 0
+          "decayTime": 0,
+          "minValue": 0.1
         },
         "/global_costmap/costmap": {
           "visible": false,
@@ -100,9 +101,11 @@
         "/navigation/cloud_filtered": {
           "visible": true,
           "pointSize": 1,
-          "colorMode": "flat",
-          "flatColor": "#36e5ffff",
-          "decayTime": 0
+          "colorMode": "colormap",
+          "decayTime": 0,
+          "colorField": "z",
+          "colorMap": "turbo",
+          "minValue": 0.1
         }
       },
       "layers": {},
@@ -168,12 +171,13 @@
           "invalidColor": "#d96c23ff"
         },
         "/map_cloud": {
-          "visible": false,
+          "visible": true,
           "pointSize": 1,
           "colorMode": "colormap",
           "colorField": "z",
           "colorMap": "turbo",
-          "decayTime": 0
+          "decayTime": 0,
+          "minValue": 0.1
         },
         "/global_costmap/costmap": {
           "visible": false,
@@ -217,11 +221,13 @@
           "visible": true
         },
         "/navigation/cloud_filtered": {
-          "visible": false,
+          "visible": true,
           "pointSize": 1,
-          "colorMode": "flat",
-          "flatColor": "#36e5ffff",
-          "decayTime": 0
+          "colorMode": "colormap",
+          "decayTime": 0,
+          "colorField": "z",
+          "colorMap": "turbo",
+          "minValue": 0.1
         }
       },
       "layers": {},
