@@ -9,7 +9,7 @@ import threading
 import time
 
 import numpy as np
-from prepare_map import quaternion, rigid
+from prepare_map import is_floor, quaternion, rigid
 
 LASER_TOPIC = '/navigation/cloud'
 MAX_SCAN_AGE = 1.0
@@ -50,6 +50,13 @@ def yaw(pose):
 def rotation_z(angle):
     c, s = math.cos(angle), math.sin(angle)
     return np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])
+
+
+def map_display_points(points):
+    # Matcher.prior is in the saved map's level, floor-calibrated coordinates.
+    rows = np.flatnonzero(~is_floor(points[:, 2]))
+    step = max(1, math.ceil(len(rows)/160000))
+    return np.ascontiguousarray(points[rows[::step]], dtype='<f4')
 
 
 def planar(body):
@@ -210,6 +217,7 @@ def main():
             retained = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                                   reliability=ReliabilityPolicy.RELIABLE)
             self.map_pub = self.create_publisher(PointCloud2, '/map_cloud', retained)
+            self.display_points = None
             self.map_shown = False
             self.map_subscribers = 0
             self.last_map_publish = -math.inf
@@ -230,9 +238,9 @@ def main():
             self.map_subscribers = subscribers
             if not subscribers or (self.map_shown and not joined and time.monotonic()-self.last_map_publish < 15):
                 return
-            map_points = np.asarray(self.matcher.prior.points)
-            step = max(1, math.ceil(len(map_points)/160000))
-            points = np.ascontiguousarray(map_points[::step], dtype='<f4')
+            if self.display_points is None:
+                self.display_points = map_display_points(np.asarray(self.matcher.prior.points))
+            points = self.display_points
             msg = PointCloud2()
             msg.header.frame_id, msg.header.stamp = 'map', self.get_clock().now().to_msg()
             msg.height, msg.width = 1, len(points)

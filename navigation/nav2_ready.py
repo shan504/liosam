@@ -8,6 +8,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.time import Time
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
+from robot_model import publish_model
 
 
 class Nav2Ready(Node):
@@ -23,6 +24,7 @@ class Nav2Ready(Node):
         self.last_status = None
         self.create_subscription(Bool, '/localization/valid', self.on_valid, qos_profile_sensor_data)
         self.timer = self.create_timer(0.1, self.tick)
+        publish_model(self)
         self.report('地图服务已启动，等待 GICP 定位和机身坐标变换')
 
     def report(self, text):

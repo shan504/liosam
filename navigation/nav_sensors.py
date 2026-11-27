@@ -18,6 +18,7 @@ from dense_map import transform
 from native_cloud import calibration, compose_rotation, interpolate, place
 from native_odom import read_sample, validated
 from native_sensor_clock import SensorClock
+from prepare_map import is_floor
 
 RAW_ODOM = '/utlidar/robot_odom'
 SCAN_FRAME = 'go2_nav_scan'
@@ -65,17 +66,24 @@ def scan_geometry(world, body_pose, lidar_pose, body_height, band=(.085, .85)):
     q_level = yaw_only(body_pose[3:])
     level = transform(world, np.r_[lidar_pose[:3], q_level], inverse=True)
     ground_z = body_pose[2] - body_height
-    obstacle = (world[:, 2] >= ground_z + band[0]) & (world[:, 2] <= ground_z + band[1])
+    heights = world[:, 2] - ground_z
+    obstacle = (heights >= band[0]) & (heights <= band[1])
     x, y = level[obstacle, 0], level[obstacle, 1]
     d = np.hypot(x, y)
     ok = (d >= RANGE_MIN) & (d <= RANGE_MAX)
     # Nearest beam center, wrapping consistently at +/- pi.
     bins = np.rint((np.arctan2(y[ok], x[ok]) + math.pi) * (BINS / TWO_PI)).astype(int) % BINS
-    ranges = np.full(BINS, np.inf, np.float32)
+    ranges = np.full(BINS, np.inf, d.dtype)
     np.minimum.at(ranges, bins, d[ok])
+    # Retain a real XYZ return for each observed ray, preserving the physical sensor origin.
+    # A farther return on that ray must not clear space behind the nearer obstacle.
+    nearest = d[ok] == ranges[bins]
+    _, first = np.unique(bins[nearest], return_index=True)
+    obstacle_rows = np.flatnonzero(obstacle)[ok][nearest][first]
     ranges[~np.isfinite(ranges)] = np.nan  # Missing returns cannot assert clear space.
     inverse_body = body_pose[3:] * np.array([-1, -1, -1, 1])
-    return lidar, ranges, compose_rotation(inverse_body, q_level)
+    return (lidar, ~is_floor(heights), lidar[obstacle_rows], ranges.astype(np.float32, copy=False),
+            compose_rotation(inverse_body, q_level))
 
 
 def stamp_ns(stamp):
@@ -125,6 +133,8 @@ def main():
             super().__init__('go2_navigation_sensors')
             self.odom = self.create_publisher(Odometry, '/odom', 10)
             self.cloud = self.create_publisher(PointCloud2, '/navigation/cloud', sensor_qos)
+            self.display_cloud = self.create_publisher(PointCloud2, '/navigation/cloud_filtered', sensor_qos)
+            self.obstacles = self.create_publisher(PointCloud2, '/navigation/obstacles', 5)
             self.scan = self.create_publisher(LaserScan, '/navigation/scan', sensor_qos)
             self.tf = TransformBroadcaster(self)
             self.static = StaticTransformBroadcaster(self)
@@ -225,7 +235,8 @@ def main():
                 # Time-aligned interpolation and lever arm use the same routines as mapping.
                 world, lidar_pose = place(start, points, history, mount, RANGE_MIN, 40.)
                 pos, q = interpolate(history, np.array([start], dtype=np.int64))
-                lidar, ranges, level_q = scan_geometry(world, np.r_[pos[0], q[0]], lidar_pose, body_height, band)
+                lidar, visible, obstacles, ranges, level_q = scan_geometry(
+                    world, np.r_[pos[0], q[0]], lidar_pose, body_height, band)
                 if not len(lidar):
                     raise ValueError('滤除机身回波后无有效点')
             except (OSError, ValueError, struct.error) as exc:
@@ -234,14 +245,11 @@ def main():
                 return
             stamp = Time(sec=start//10**9, nanosec=start%10**9)
             self.tf.sendTransform(edge(stamp, 'base_link', SCAN_FRAME, mount[:3], level_q))
-            pc = PointCloud2()
-            pc.header.frame_id, pc.header.stamp = sensor_frame, stamp
-            pc.height, pc.width, pc.fields = 1, len(lidar), self.fields
-            pc.point_step, pc.row_step, pc.is_dense = 16, 16*len(lidar), True
-            payload = array('B')
-            payload.frombytes(lidar.astype('<f4', copy=False).tobytes())
-            pc.data = payload
-            self.cloud.publish(pc)
+            self.publish_cloud(self.cloud, stamp, lidar)
+            if self.display_cloud.get_subscription_count():
+                self.publish_cloud(self.display_cloud, stamp, lidar[visible])
+            if len(obstacles):
+                self.publish_cloud(self.obstacles, stamp, obstacles)
             sc = LaserScan()
             sc.header.frame_id, sc.header.stamp = SCAN_FRAME, stamp
             sc.angle_min = -math.pi
@@ -254,6 +262,16 @@ def main():
             beam_data.frombytes(ranges.tobytes())
             sc.ranges = beam_data
             self.scan.publish(sc)
+
+        def publish_cloud(self, publisher, stamp, points):
+            pc = PointCloud2()
+            pc.header.frame_id, pc.header.stamp = sensor_frame, stamp
+            pc.height, pc.width, pc.fields = 1, len(points), self.fields
+            pc.point_step, pc.row_step, pc.is_dense = 16, 16*len(points), True
+            payload = array('B')
+            payload.frombytes(points.astype('<f4', copy=False).tobytes())
+            pc.data = payload
+            publisher.publish(pc)
 
     rclpy.init(args=ros_args)
     node = Sensors()

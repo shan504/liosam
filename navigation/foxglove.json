@@ -41,8 +41,12 @@
       "topics": {
         "/map": {
           "visible": true,
-          "colorMode": "map",
-          "alpha": 0.65
+          "colorMode": "custom",
+          "alpha": 1.0,
+          "minColor": "#ffffffff",
+          "maxColor": "#101214ff",
+          "unknownColor": "#858a8eff",
+          "invalidColor": "#d96c23ff"
         },
         "/map_cloud": {
           "visible": true,
@@ -83,16 +87,19 @@
         "/navigation/waypoints": {
           "visible": true
         },
-        "/navigation/cloud": {
+        "/navigation/scan": {
           "visible": false,
           "pointSize": 2,
           "colorMode": "flat",
           "flatColor": "#36e5ffff",
           "decayTime": 0
         },
-        "/navigation/scan": {
+        "/go2_visual/live/model_mesh": {
+          "visible": true
+        },
+        "/navigation/cloud_filtered": {
           "visible": true,
-          "pointSize": 2,
+          "pointSize": 1,
           "colorMode": "flat",
           "flatColor": "#36e5ffff",
           "decayTime": 0
@@ -153,8 +160,12 @@
       "topics": {
         "/map": {
           "visible": true,
-          "colorMode": "map",
-          "alpha": 0.65
+          "colorMode": "custom",
+          "alpha": 1.0,
+          "minColor": "#ffffffff",
+          "maxColor": "#101214ff",
+          "unknownColor": "#858a8eff",
+          "invalidColor": "#d96c23ff"
         },
         "/map_cloud": {
           "visible": false,
@@ -165,12 +176,12 @@
           "decayTime": 0
         },
         "/global_costmap/costmap": {
-          "visible": true,
+          "visible": false,
           "colorMode": "costmap",
           "alpha": 0.24
         },
         "/local_costmap/costmap": {
-          "visible": true,
+          "visible": false,
           "colorMode": "costmap",
           "alpha": 0.4
         },
@@ -195,16 +206,19 @@
         "/navigation/waypoints": {
           "visible": true
         },
-        "/navigation/cloud": {
+        "/navigation/scan": {
           "visible": false,
           "pointSize": 2,
           "colorMode": "flat",
           "flatColor": "#36e5ffff",
           "decayTime": 0
         },
-        "/navigation/scan": {
+        "/go2_visual/live/model_mesh": {
+          "visible": true
+        },
+        "/navigation/cloud_filtered": {
           "visible": false,
-          "pointSize": 2,
+          "pointSize": 1,
           "colorMode": "flat",
           "flatColor": "#36e5ffff",
           "decayTime": 0

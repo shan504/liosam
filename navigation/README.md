@@ -16,6 +16,6 @@ sudo docker exec go2-lio-nav bash -lc 'source /opt/ros/humble/setup.bash && sour
 
 ## 共用参数
 
-`nav2.yaml` 供所有地图使用。NavFn A* 使用全局静态栅格与膨胀代价；局部 DWB 在 4 × 4 m 滚动窗口内使用静态层、MID‑360S 扫描障碍层和膨胀层。机身轮廓默认 0.80 × 0.44 m，另设 0.01 m padding，两个膨胀层的半径均为 0.45 m。调节转向可修改 `FollowPath.angular_dist_threshold`、`angular_disengage_threshold`、`rotate_to_heading_angular_vel` 和终点 `yaw_goal_tolerance`。默认约 20° 进入路径朝向校正，约 11.5° 退出；前进上限 0.30 m/s，原地转向上限 0.50 rad/s；到点容差 0.30 m 和约 11.5°。这些是初始参数，现场精度取决于定位及地面条件。
+`nav2.yaml` 供所有地图使用。NavFn A* 使用全局静态栅格与膨胀代价；局部 DWB 在 4 × 4 m 滚动窗口内使用静态层、MID‑360S 扫描障碍层和膨胀层。机身轮廓默认 0.80 × 0.44 m，另设 0.01 m padding，两个膨胀层的半径均为 0.225 m。调节转向可修改 `FollowPath.angular_dist_threshold`、`angular_disengage_threshold`、`rotate_to_heading_angular_vel` 和终点 `yaw_goal_tolerance`。默认约 20° 进入路径朝向校正，约 11.5° 退出；前进上限 0.30 m/s，原地转向上限 0.50 rad/s；到点容差 0.30 m 和约 11.5°。这些是初始参数，现场精度取决于定位及地面条件。
 
-Go2 原生里程计发布 odom→base_link。GICP 按扫描时间配准，当连续三帧通过检查后发布 map→odom。定位有效且 TF 就绪后才激活 Nav2；运动桥还检查实时扫描、里程计及当前队列动作。建图与导航是两个独立运行会话。离线的跨地图回归可用 `python3 navigation/tests/test_map_scope.py` 执行。
+Go2 原生里程计发布 odom→base_link。GICP 按扫描时间配准，当连续三帧通过检查后发布 map→odom。定位有效且 TF 就绪后才激活 Nav2；运动桥还检查实时扫描、里程计及当前队列动作。建图与导航是两个独立运行会话。导航界面用白色表示已观测的可通行栅格、黑色表示静态障碍、灰色表示未知。全局与局部代价图可以在 3D 面板中单独勾选。两个视图通过 `/go2_visual/live/model_mesh` 显示建图所用的 Go2 模型。地图显示点云 `/map_cloud` 与实时显示点云 `/navigation/cloud_filtered` 过滤标定地面上下 4.5 cm 内的回波。实时地面高度以本体位置和地图中保存的站立高度推算。GICP 使用完整点云，栅格使用地面回波判断已观测的通行区域。实时障碍层使用 `/navigation/obstacles` 中具有实际雷达坐标与时间戳的障碍回波。离线的跨地图回归可用 `python3 navigation/tests/test_map_scope.py` 执行。

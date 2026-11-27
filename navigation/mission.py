@@ -13,6 +13,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
+from rcl_interfaces.msg import Log
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
@@ -31,6 +32,7 @@ class Mission(Node):
         self.armed = False
         self.active = self.goal_handle = None
         self.goal_sent_at = self.cancel_started = 0.
+        self.nav_logs = {}
         self.action_fault = ''
         profile = yaml.safe_load(Path(__file__).with_name('nav2.yaml').read_text())['velocity_smoother']['ros__parameters']
         hi, lo = profile['max_velocity'], profile['min_velocity']
@@ -66,6 +68,7 @@ class Mission(Node):
         self.create_subscription(Odometry, '/odom', self.odometry, qos_profile_sensor_data)
         self.create_subscription(LaserScan, '/navigation/scan', self.scan, qos_profile_sensor_data)
         self.create_subscription(Twist, '/cmd_vel_nav', self.velocity, 1)
+        self.create_subscription(Log, '/rosout', self.on_nav_log, 20)
         self.create_timer(.05, self.tick)
         self.draw()
 
@@ -242,6 +245,7 @@ class Mission(Node):
         assert self.route and self.active is None
         self.active = self.route[0]
         self.goal_sent_at = time.monotonic()
+        self.nav_logs.clear()
         self.void_goal = False
         self.cancel_next = 0.
         self.command = None
@@ -253,6 +257,37 @@ class Mission(Node):
         except Exception as exc:
             self.uncertain('目标发送状态不明：' + str(exc))
 
+    def on_nav_log(self, msg):
+        if self.active is None or self.void_goal or msg.level < 30:
+            return
+        # Only associate logs emitted after this particular goal was dispatched.
+        start = self.active[1].header.stamp
+        if (msg.stamp.sec, msg.stamp.nanosec) < (start.sec, start.nanosec):
+            return
+        logger = msg.name.split('.')[-1]
+        detail = msg.msg.lower()
+        if logger in ('planner_server', 'controller_server'):
+            if 'aborting handle' in detail:
+                return
+            if msg.level < 40 and not any(word in detail for word in
+                    ('failed', 'failure', 'unable', 'cannot', 'invalid', 'no valid', 'no path', 'timed out')):
+                return
+            priority = 2
+        elif logger in ('local_costmap', 'global_costmap') and 'observation buffer' in detail:
+            priority = 1
+        else:
+            return
+        stamp = msg.stamp.sec * 10**9 + msg.stamp.nanosec
+        self.nav_logs[priority] = (stamp, f'{logger}: {" ".join(msg.msg.split())[:240]}')
+
+    def recent_nav_log(self):
+        now = self.get_clock().now().nanoseconds
+        for priority in sorted(self.nav_logs, reverse=True):
+            stamp, detail = self.nav_logs[priority]
+            if 0 <= now - stamp <= 12 * 10**9:
+                return ' | 近期 Nav2 日志：' + detail
+        return ''
+
     def accepted(self, future):
         try:
             handle = future.result()
@@ -263,7 +298,7 @@ class Mission(Node):
         if not handle.accepted:
             self.action_fault = ''
             self.active, self.void_goal = None, False
-            self.pause('Nav2 拒绝航点；检查地图、目标及 Nav2 状态后重新启用')
+            self.pause('Nav2 拒绝航点；检查地图、目标及 Nav2 状态后重新启用' + self.recent_nav_log())
             return
         self.goal_handle = handle
         try:
@@ -299,7 +334,10 @@ class Mission(Node):
                     self.reason += '，队列已完成'
             else:
                 self.armed = False
-                self.reason = f'Nav2 返回状态 {status}；当前航点保留，已暂停'
+                if status == GoalStatus.STATUS_ABORTED:
+                    self.reason = 'Nav2 已中止（状态 6）；当前航点保留，已暂停' + self.recent_nav_log()
+                else:
+                    self.reason = f'Nav2 返回状态 {status}；当前航点保留，已暂停'
         self.draw()
         self.report()
 

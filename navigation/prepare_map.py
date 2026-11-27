@@ -14,12 +14,20 @@ import numpy as np
 
 RESOLUTION = 0.05
 VOXEL = 0.10
+FLOOR_TOLERANCE = 0.045
+OBSTACLE_MIN_HEIGHT = 0.085
+OBSTACLE_MAX_HEIGHT = 0.85
 MAX_CELLS = 16_000_000
 MAX_VOXELS = 1_500_000
 
 
 def read_json(path):
     return json.loads(path.read_text(encoding='utf-8'))
+
+
+def is_floor(height):
+    """Test height in metres relative to the measured floor plane."""
+    return np.abs(height) <= FLOOR_TOLERANCE
 
 
 def rigid(xyz, xyzw):
@@ -159,15 +167,19 @@ def observe(grid, xy, lower_cell, height_only):
 def observe_rays(free, origin, xyz, lower):
     # Only scan times exactly equal to an optimized LiDAR keyframe have a
     # measured origin in the archive. Other scans still contribute endpoints.
-    hits = xyz[(xyz[:, 2] >= -.04) & (xyz[:, 2] <= .75), :2]
-    delta = hits - origin[:2]
+    hits = xyz[(xyz[:, 2] >= -FLOOR_TOLERANCE) & (xyz[:, 2] <= OBSTACLE_MAX_HEIGHT)]
+    delta = hits[:, :2] - origin[:2]
     distance = np.linalg.norm(delta, axis=1)
     near = (distance >= .1) & (distance < 16.)
     delta, distance = delta[near], distance[near]
     if not len(distance):
         return
     bins = np.floor(np.arctan2(delta[:, 1], delta[:, 0]) / np.deg2rad(1.)).astype(int)
-    order = np.lexsort((distance, bins))
+    # A nearby floor return does not block a measured ray in the same sector.
+    # Stop at its nearest potential obstacle, or the farthest observed floor
+    # if the sector has only floor returns. Unobserved sectors remain unknown.
+    floor = is_floor(hits[near, 2])
+    order = np.lexsort((np.where(floor, -distance, distance), floor, bins))
     ids = order[np.r_[True, bins[order][1:] != bins[order][:-1]]]
     directions = delta[ids] / distance[ids, None]
     # Sample below half a grid cell and stop short of the observed surface.
@@ -214,8 +226,8 @@ def build(version, dest, layout):
                 raise ValueError('逐帧索引与点云或关键帧不一致')
             xyz = apply(cloud[start:start+n], ground)
             # Real endpoints on this measured floor; no distant ceiling clears floor.
-            observe(free, xyz[np.abs(xyz[:, 2]) <= .045, :2], lower, False)
-            obs = (xyz[:, 2] >= .085) & (xyz[:, 2] <= .85)
+            observe(free, xyz[is_floor(xyz[:, 2]), :2], lower, False)
+            obs = (xyz[:, 2] >= OBSTACLE_MIN_HEIGHT) & (xyz[:, 2] <= OBSTACLE_MAX_HEIGHT)
             observe(obstacles, xyz[obs, :2], lower, True)
             if stamp == anchor:
                 observe_rays(free, poses[anchor][:3, 3], xyz, lower)
@@ -244,7 +256,8 @@ def build(version, dest, layout):
                     body_from_lidar=mount.tolist(), initial_map_from_body=initial.tolist(),
                     initial_base_pose=initial[:3, 3].tolist() + quaternion(initial[:3, :3]).tolist(),
                     grid_resolution=RESOLUTION, voxel_size=VOXEL, scans=n_scans, exact_origin_scans=exact,
-                    floor_band_m=[-.045, .045], obstacle_band_m=[.085, .85],
+                    floor_band_m=[-FLOOR_TOLERANCE, FLOOR_TOLERANCE],
+                    obstacle_band_m=[OBSTACLE_MIN_HEIGHT, OBSTACLE_MAX_HEIGHT],
                     target_points=len(target), source_version=str(version))
     (dest / 'metadata.json').write_text(json.dumps(metadata, allow_nan=False, indent=2)+'\n')
 
