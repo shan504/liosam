@@ -46,7 +46,7 @@ def create_sdk_share(directory):
 
     base = {
         'planner_server': params(GridBased={}),
-        'controller_server': params(FollowPath={'critics': ['BaseObstacle', 'RotateToGoal']},
+        'controller_server': params(FollowPath={'critics': ['Oscillation', 'BaseObstacle', 'RotateToGoal']},
                                     progress_checker={}, general_goal_checker={}),
         'behavior_server': params(),
         'bt_navigator': params(),
@@ -100,7 +100,8 @@ class OriginalNavigationIntegration(unittest.TestCase):
             # without removing zero-X turning or the acceleration ramp.
             self.assertEqual(follow['vx_samples'], 2)
             self.assertEqual(follow['min_vel_x'], 0.)
-            self.assertEqual(follow['min_speed_xy'], 0.)
+            self.assertEqual(follow['min_speed_xy'], .01)
+            self.assertEqual(follow['min_speed_theta'], .10)
             self.assertEqual(follow['max_speed_xy'], .30)
             self.assertEqual(follow['trajectory_generator_name'], 'dwb_plugins::StandardTrajectoryGenerator')
             self.assertFalse(follow['limit_vel_cmd_in_traj'])
@@ -110,10 +111,17 @@ class OriginalNavigationIntegration(unittest.TestCase):
             # From rest the simulation window must reach the 0.30 candidate;
             # a one-tick dynamic window would silently restore weak commands.
             self.assertGreaterEqual(follow['acc_lim_x'] * follow['sim_time'], .30)
-            self.assertEqual(follow['vtheta_samples'], 31)
+            self.assertEqual(follow['vtheta_samples'], 7)
             self.assertEqual(follow['max_vel_x'], .30)
-            self.assertEqual(follow['max_vel_theta'], .60)
-            self.assertEqual(follow['rotate_to_heading_angular_vel'], .80)
+            self.assertEqual(follow['max_vel_theta'], 1.20)
+            self.assertEqual(follow['rotate_to_heading_angular_vel'], 1.20)
+            self.assertEqual(follow['acc_lim_theta'], 1.60)
+            self.assertEqual(follow['decel_lim_theta'], -1.60)
+            self.assertEqual(follow['acc_lim_theta'], follow['max_angular_accel'])
+            self.assertIn('Oscillation', follow['critics'])
+            self.assertEqual(follow['Oscillation.oscillation_reset_time'], 2.)
+            self.assertEqual(follow['Oscillation.oscillation_reset_dist'], .05)
+            self.assertEqual(follow['Oscillation.oscillation_reset_angle'], .20)
             self.assertFalse(follow['closed_loop'])
             smoother = config['velocity_smoother']['ros__parameters']
             self.assertEqual(smoother['feedback'], 'OPEN_LOOP')
@@ -140,12 +148,18 @@ class OriginalNavigationIntegration(unittest.TestCase):
         gate = logic.CommandGate()
         gate.max_linear, gate.max_yaw = motion.LINEAR_SPEED, motion.YAW_SPEED
         gate.set_enabled(True)
-        for yaw in [-motion.PATH_TURN_SPEED, -.173684, 0., .173684, motion.PATH_TURN_SPEED]:
-            with self.subTest(yaw=yaw):
-                gate.receive(0., 0., yaw, 10.)
-                action, command = gate.poll(10.01, True)
-                self.assertEqual(action, 'move')
-                self.assertAlmostEqual(command[2], yaw)
+        for x in (0., motion.LINEAR_SPEED):
+            for yaw in [-1.2, -.8, -.4, -.173684, 0., .173684, .4, .8, 1.2]:
+                with self.subTest(x=x, yaw=yaw):
+                    gate.receive(x, 0., yaw, 10.)
+                    action, command = gate.poll(10.01, True)
+                    self.assertEqual(action, 'move')
+                    self.assertEqual(command[0], x)
+                    self.assertAlmostEqual(command[2], yaw)
+        # Limits still cap an excessive request rather than disabling the gate.
+        for sign in (-1., 1.):
+            gate.receive(0., 0., sign * 3., 10.)
+            self.assertEqual(gate.poll(10.01, True), ('move', (0., 0., sign * 1.2)))
         gate.set_enabled(False)
         self.assertNotEqual(gate.poll(10.02, True)[0], 'move')
 

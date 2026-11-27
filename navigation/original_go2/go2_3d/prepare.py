@@ -7,7 +7,9 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from denoise import settings
-from motion_profile import configure_navigation, LINEAR_SPEED, TRACKING_YAW_SPEED, PATH_TURN_SPEED
+from motion_profile import (configure_navigation, LINEAR_SPEED, TRACKING_YAW_SPEED,
+                            PATH_TURN_SPEED, YAW_ACCELERATION, ANGULAR_SAMPLES,
+                            OSCILLATION_RESET_TIME)
 from navigation_grid import current_settings, prepare as prepare_navigation_grid
 sys.path.insert(0, '/opt/go2_project/patches/dds')
 from prepare import prepare as legacy_prepare
@@ -93,6 +95,8 @@ def main(mode='mapping'):
     (output/'nav2_3d.yaml').write_text(yaml.safe_dump(nav,sort_keys=False))
     print(f'导航运动参数：前进候选 0/{LINEAR_SPEED:.2f}m/s（原 Go2 配置，起停保留加减速），跟踪转向上限 '
           f'{TRACKING_YAW_SPEED:.2f}rad/s，路径对准 {PATH_TURN_SPEED:.2f}rad/s；'
+          f'角加速度 {YAW_ACCELERATION:.2f}rad/s²，转向采样 {ANGULAR_SAMPLES} 档，'
+          f'方向锁定超时 {OSCILLATION_RESET_TIME:.1f}s；'
           '本体位姿驱动 TF，保留足迹碰撞检查；无有效轨迹时打印拒绝原因。')
     if mode in ('localization', 'navigation'):
         prepare_navigation_grid('/maps', '/runtime/navigation_map')

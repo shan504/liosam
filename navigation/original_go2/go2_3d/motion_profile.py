@@ -2,19 +2,22 @@
 import math
 
 LINEAR_SPEED = 0.30
-TRACKING_YAW_SPEED = 0.60
-# The field log reached Sport with ~0.17rad/s while measured yaw remained
-# near zero. Give collision-checked tracking and deliberate alignment a
-# wider command range; the bridge must never amplify a small planned turn.
-PATH_TURN_SPEED = 0.80
+TRACKING_YAW_SPEED = 1.20
+# Wider turning trial requested after weak yaw response in the field.
+# DWB/shim must validate the stronger turn before it reaches the bridge.
+PATH_TURN_SPEED = 1.20
 YAW_SPEED = PATH_TURN_SPEED
 LINEAR_ACCELERATION = 0.40
-YAW_ACCELERATION = 0.80
+YAW_ACCELERATION = 1.60
 TRAJECTORY_TIME = 1.20
 # Restore the original shan504/go2 forward policy. The field run with seven
 # samples selected weak forward commands and repeatedly made no progress.
 FORWARD_SAMPLES = 2
-ANGULAR_SAMPLES = 31
+# From rest: -1.2, -0.8, -0.4, 0, 0.4, 0.8, 1.2 rad/s. Merely widening
+# max_vel_theta with 31 samples would still allow ineffective tiny turns.
+# At high measured yaw the iterator still respects acceleration reachability.
+ANGULAR_SAMPLES = 7
+OSCILLATION_RESET_TIME = 2.0
 ARRIVAL_RADIUS = 0.30
 PATH_HEADING_THRESHOLD = 0.35
 PATH_HEADING_RELEASE = 0.20
@@ -51,8 +54,12 @@ def configure_navigation(nav):
     # Do not clamp a planned slow command upward in the actuator bridge.
     follow.update(min_vel_x=0.0, max_vel_x=LINEAR_SPEED,
                   min_vel_y=0.0, max_vel_y=0.0, max_vel_theta=TRACKING_YAW_SPEED,
-                  min_speed_xy=0.0, max_speed_xy=LINEAR_SPEED,
-                  min_speed_theta=0.0, vx_samples=FORWARD_SAMPLES, vy_samples=1,
+                  # Humble tests these two minima together. Exclude almost
+                  # stationary pure turns (including floating-point near-zero
+                  # samples), while allowing X=0 turns and straight X=0.30.
+                  # This does not impose a minimum at the actuator/stop path.
+                  min_speed_xy=0.01, max_speed_xy=LINEAR_SPEED,
+                  min_speed_theta=0.10, vx_samples=FORWARD_SAMPLES, vy_samples=1,
                   vtheta_samples=ANGULAR_SAMPLES, debug_trajectory_details=True,
                   trajectory_generator_name='dwb_plugins::StandardTrajectoryGenerator',
                   limit_vel_cmd_in_traj=False, sim_time=TRAJECTORY_TIME,
@@ -60,6 +67,13 @@ def configure_navigation(nav):
                   acc_lim_theta=YAW_ACCELERATION,
                   decel_lim_x=-LINEAR_ACCELERATION, decel_lim_y=-LINEAR_ACCELERATION,
                   decel_lim_theta=-YAW_ACCELERATION)
+    # The field log shows collision rejection in one direction and an
+    # Oscillation lock in the other. Retain the critic, but let it reconsider
+    # directions after 2s even when physical motion is too small to reset it.
+    # This clears no obstacle and grants no motion authority.
+    follow['Oscillation.oscillation_reset_dist'] = 0.05
+    follow['Oscillation.oscillation_reset_angle'] = 0.20
+    follow['Oscillation.oscillation_reset_time'] = OSCILLATION_RESET_TIME
     # Patrol waypoints mean reaching a location; the user does not require a
     # final heading. SimpleGoalChecker uses shortest-angle yaw errors in [-pi,
     # pi], so pi accepts every heading. Still check current XY on every call.
