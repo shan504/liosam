@@ -10,7 +10,7 @@ bash ~/go2-detail/navigation/start.sh inroom1
 
 ## 定位和行走
 
-1. 从该地图建图起点、原朝向启动，或在 Foxglove 左侧窗口用“估计位姿”指定实际位置和朝向。连接终端打印的 Wi-Fi WebSocket 地址，导入 `navigation/foxglove.json`。
+1. 从该地图建图起点、原朝向启动，或在 Foxglove 左侧窗口用“估计位姿”指定实际位置和朝向。建图和导航共用仓库根目录的 [Go2.json](../Go2.json)。首次连接终端打印的 Wi-Fi WebSocket 地址后导入一次，切换模式时继续使用同一布局。两个视图默认三维透视，按住右键拖动旋转，左键拖动平移，滚轮缩放。
 2. 等待 GICP 报告定位有效、Nav2 就绪。在右侧导航视图依次设置目标，核对航点编号。初次实验可以从附近一个实际畅通的目标开始。
 3. 点击“启用运动”。“停止运动＋取消导航”和“取消路线”按旧 Go2 的语义取消整条路线。“重试暂停路线”用于恢复保留了待执行航点的暂停任务。
 4. 在机器狗终端按 Ctrl+C 结束实验。状态话题包括 `/localization/valid`、`/navigation/startup_status`、`/operator/status` 和 `/control/status`。原版故障记录器产生的事件在 `~/.local/state/go2-navigation/diagnostics/` 下。

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Relay the D435i color stream into the existing Noetic Foxglove image panel."""
+import io
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import threading
 import time
 
 OUTPUT = '/camera/image/compressed'
+DISPLAY = '/camera/display/compressed'
 PERIOD = 1 / 8
 MAX_BYTES = 8 * 1024 * 1024
 
@@ -40,7 +42,6 @@ def jpeg(msg):
     except ImportError:
         pass
     else:
-        import io
         mode = 'RGBA' if channels == 4 else 'RGB'
         im = Image.frombytes(mode, (msg.width, msg.height), bytes(msg.data),
                              'raw', formats[encoding], msg.step, 1)
@@ -59,6 +60,36 @@ def jpeg(msg):
     if not ok:
         raise ValueError('JPEG 编码失败')
     return 'jpeg', buf.tobytes()
+
+
+def upright_image(msg):
+    """Rotate this mount's display pixels; keep the raw camera message intact."""
+    data = bytes(msg.data)
+    jpeg_input = data.startswith(b'\xff\xd8\xff')
+    try:
+        from PIL import Image
+    except ImportError:
+        import cv2
+        import numpy as np
+        pixels = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        if pixels is None:
+            raise ValueError('图像解码失败')
+        ext, params = ('.jpg', [cv2.IMWRITE_JPEG_QUALITY, 85]) if jpeg_input else ('.png', [])
+        ok, buf = cv2.imencode(ext, cv2.flip(pixels, -1), params)
+        if not ok:
+            raise ValueError('图像编码失败')
+        data = buf.tobytes()
+    else:
+        out = io.BytesIO()
+        with Image.open(io.BytesIO(data)) as image:
+            # ROTATE_180 is also available on the Pillow shipped with Noetic.
+            rotated = image.transpose(getattr(Image, 'Transpose', Image).ROTATE_180)
+            if jpeg_input:
+                rotated.save(out, format='JPEG', quality=85)
+            else:
+                rotated.save(out, format='PNG')
+        data = out.getvalue()
+    return type(msg)(header=msg.header, format='jpeg' if jpeg_input else 'png', data=data)
 
 
 class Latest:
@@ -260,6 +291,14 @@ def run(directory):
     import rospy
     from sensor_msgs.msg import CompressedImage
     rospy.init_node('go2_d435_display')
+    display = rospy.Publisher(DISPLAY, CompressedImage, queue_size=1)
+    def show(msg, inverted):
+        if display.get_num_connections():
+            try:
+                display.publish(upright_image(msg) if inverted else msg)
+            except Exception as exc:
+                rospy.logwarn_throttle(5, '相机显示图像不可用: %s', exc)
+
     children = []
     def spawn(cmd, env=None):
         p = subprocess.Popen(cmd, env=env)
@@ -293,6 +332,11 @@ def run(directory):
                 msg.data[:3] == b'\xff\xd8\xff' or msg.data[:8] == b'\x89PNG\r\n\x1a\n'):
             external_rx = time.monotonic()
             external_frame = msg.header.frame_id
+            # An existing camera publisher can own OUTPUT. The Go2 front camera
+            # already publishes upright pixels; RealSense optical frames use
+            # the inverted mount on this robot.
+            frame = external_frame.lower().lstrip('/')
+            show(msg, 'd435' in frame or frame in ('camera_color_optical_frame', 'camera_color_frame'))
     current = None
     try:
         while not rospy.is_shutdown():
@@ -342,6 +386,7 @@ def run(directory):
                                         abs(receipt.to_nsec()-stamp) < 2_000_000_000 else receipt)
                     msg.header.frame_id, msg.format, msg.data = frame, fmt, data
                     pub.publish(msg)
+                    show(msg, True)
                     if source != (name, topic):
                         rospy.loginfo('D435i 彩色图像已发布 %s %s -> %s (%d bytes)', name, topic, OUTPUT, len(data))
                         source = name, topic

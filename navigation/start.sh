@@ -93,6 +93,7 @@ done
 [[ -s $share/scan.bin ]] || { echo '60 秒内未收到 MID‑360S 扫描，请看上方驱动输出。' >&2; exit 1; }
 wifi=$(ip -o -4 addr show dev wlan0 2>/dev/null | awk 'NR==1 {split($4, a, "/"); print a[1]}')
 [[ -z $wifi ]] || echo "Foxglove WebSocket：ws://$wifi:8766"
+echo "建图和导航共用 Foxglove 布局 $repo/Go2.json"
 echo '初始定位采用所选地图的建图起点及朝向；在其他位置可用 Foxglove 的“估计位姿”指定。运动初始关闭。'
 diag_root="$HOME/.local/state/go2-navigation/diagnostics"
 session=$(/usr/bin/python3 - "$original/go2_3d" "$diag_root" "$version" <<'PY_SESSION'

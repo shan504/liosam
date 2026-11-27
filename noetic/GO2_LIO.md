@@ -1,6 +1,6 @@
 # Go2 本体里程计与 LIO-SAM 建图
 
-在机器人终端执行 `bash ~/go2-detail/noetic/start.sh --go2`。每次启动会创建单独的地图归档。沿用 Foxglove 的 farm_live_detail 布局，在电脑上连接终端打印的 Wi-Fi 地址。右侧图像话题为 `/camera/image/compressed`，D435i RGB 只用于显示。
+在机器人终端执行 `bash ~/go2-detail/noetic/start.sh --go2`。每次启动会创建单独的地图归档。在 Foxglove 连接终端打印的 Wi-Fi 地址，建图与导航共用仓库根目录的 [Go2.json](../Go2.json)。右侧相机面板订阅 `/camera/display/compressed`，建图时显示已转正的 D435i 彩色画面。
 
 地面锁定后，三维建图 `/go2_visual/ground/dense_map`、实时扫描 `/go2_visual/ground/scan` 和局部细节 `/go2_visual/detail/local` 都从标定地面上方 10 cm 开始显示，墙面上部、横梁等高处回波随原始量程显示。配准、地面标定和 PCD 导出使用完整数据，后续导航用地面回波生成可通行栅格。
 

@@ -25,6 +25,7 @@ class CameraSample(Node):
         self.received_frames = 0
         self.requests = self.create_publisher(Request, "/api/videohub/request", 1)
         self.images = self.create_publisher(CompressedImage, "/camera/image/compressed", 2)
+        self.display = self.create_publisher(CompressedImage, "/camera/display/compressed", 2)
         self.create_subscription(Response, "/api/videohub/response", self.on_response, qos_profile_sensor_data)
         self.create_timer(1.0 / rate, self.poll_camera)
         self.get_logger().info(f"GetImageSample -> /camera/image/compressed (up to {rate:g} Hz; receipt stamps)")
@@ -63,6 +64,8 @@ class CameraSample(Node):
         image.format = fmt
         image.data = payload
         self.images.publish(image)
+        if self.display.get_subscription_count():
+            self.display.publish(image)
         self.received_frames += 1
         if self.received_frames == 1:
             self.get_logger().info("First camera sample published: %d bytes, %s" % (len(payload), fmt))

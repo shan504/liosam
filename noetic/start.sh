@@ -37,7 +37,7 @@ fi
 if [[ $mode == check ]]; then
     exec /usr/bin/python3 -u "$here/check_stop.py"
 fi
-files=("$HOME/go2_model_live.pyz" "$here/dense_map.py" "$here/bridge_topics.json" "$here/foxglove_endpoint.py"
+files=("$HOME/go2_model_live.pyz" "$here/dense_map.py" "$here/bridge_topics.json" "$here/foxglove_endpoint.py" "$here/display_map_frame.py"
        "$here/../navigation/obstacle_view.py")
 if [[ $mode == native || $mode == go2 ]]; then
     files+=("$here/native_odom.sh" "$here/native_odom.py" "$here/native_sensor_clock.py"
@@ -108,7 +108,7 @@ if graph is not None:
         "/mid360s_imu_units", "/mid360s_attitude", "/go2_l1_style_dense",
         "/go2_ground_view", "/go2_mapping_obstacles", "/go2_live_model_view", "/go2_visual_model",
         "/go2_native_odom_bridge", "/go2_native_cloud", "/go2_native_model",
-        "/go2_native_lio_seed", "/go2_d435_display",
+        "/go2_native_lio_seed", "/go2_d435_display", "/go2_display_map_frame",
     }
     topics = {
         "/livox/lidar", "/livox/imu", "/mid360s/imu_si", "/mid360s/imu_filtered",
@@ -270,7 +270,7 @@ check_alive() {
     local i
     for i in "${!pids[@]}"; do
         if ! kill -0 "${pids[i]}" 2>/dev/null; then
-            if [[ ${names[i]} == H_detail || ${names[i]} == I_motion || ${names[i]} == J_camera || ${names[i]} == K_status ]]; then
+            if [[ ${names[i]} == H_detail || ${names[i]} == I_motion || ${names[i]} == J_camera || ${names[i]} == K_status || ${names[i]} == D_map_frame ]]; then
                 echo "${names[i]} 辅助进程已退出；建图继续运行，请查看其日志。" >&2
                 tail -n 12 "$run_dir/${names[i]}.log" >&2
                 wait "${pids[i]}" 2>/dev/null || true
@@ -334,7 +334,7 @@ if [[ $bridge_state == start ]]; then
     if [[ $mode == go2 ]]; then
         # Exclude internal feature packets, full-rate native poses and raw camera feeds.
         # The display uses the optimized ground clouds, model TF and one JPEG stream.
-        display_topics='["^/(?:tf|tf_static|camera/image/compressed|go2_visual/(?:ground/(?:scan|dense_map|reference)|live/(?:model_mesh|surface)|detail/local)|localization/(?:valid|status)|operator/status|control/enable|navigation/cancel)$"]'
+        display_topics='["^/(?:tf|tf_static|camera/(?:image|display)/compressed|go2_visual/(?:ground/(?:scan|dense_map|reference)|live/(?:model_mesh|surface)|detail/local)|localization/(?:valid|status)|operator/status|control/enable|navigation/cancel)$"]'
     elif [[ $mode == native ]]; then
         # Only expose final display clouds; the internal registered scan duplicates the right pane.
         display_topics=$(/usr/bin/python3 -c 'import json,sys; print(json.dumps(["^(?!/go2_native/(?:registered_scan|path|lidar_pose|mount_dds|mount_ros1_11311)$)" + v.lstrip("^") for v in json.loads(sys.argv[1])]))' "$display_topics")
@@ -354,6 +354,8 @@ else
     echo '复用现有 Foxglove bridge 8766。'
 fi
 /usr/bin/python3 "$here/foxglove_endpoint.py" || { tail -n 12 "$run_dir/D_bridge.log" 2>/dev/null || true; exit 1; }
+echo "建图和导航共用 Foxglove 布局 $(dirname "$here")/Go2.json"
+start D_map_frame /usr/bin/python3 -u "$here/display_map_frame.py" "_mapping_mode:=$mode"
 if [[ $mode == go2 ]]; then
     camera_tmp=$(mktemp -d /dev/shm/go2_d435_XXXXXX)
     export GO2_CAMERA_DIR="$camera_tmp"
