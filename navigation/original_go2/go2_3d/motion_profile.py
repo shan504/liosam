@@ -2,16 +2,17 @@
 import math
 
 LINEAR_SPEED = 0.30
-TRACKING_YAW_SPEED = 0.30
-# Hardware response trial: 0.30rad/s reached Sport but produced only 2.1deg
-# in ten seconds. Keep tracking turns unchanged; request 0.50 only for the
-# shim's deliberate path alignment, with matching smoother/bridge limits.
-PATH_TURN_SPEED = 0.50
+TRACKING_YAW_SPEED = 0.60
+# The field log reached Sport with ~0.17rad/s while measured yaw remained
+# near zero. Give collision-checked tracking and deliberate alignment a
+# wider command range; the bridge must never amplify a small planned turn.
+PATH_TURN_SPEED = 0.80
 YAW_SPEED = PATH_TURN_SPEED
 LINEAR_ACCELERATION = 0.40
-YAW_ACCELERATION = 0.60
+YAW_ACCELERATION = 0.80
 TRAJECTORY_TIME = 1.20
-FORWARD_SAMPLES = 2
+FORWARD_SAMPLES = 7
+ANGULAR_SAMPLES = 31
 ARRIVAL_RADIUS = 0.30
 PATH_HEADING_THRESHOLD = 0.35
 PATH_HEADING_RELEASE = 0.20
@@ -42,12 +43,14 @@ def configure_navigation(nav):
         movement_time_allowance=10.0)
     # StandardTrajectoryGenerator samples across sim_time, rather than one
     # controller tick. From rest, 0.4 * 1.2 reaches the verified 0.30m/s.
-    # Two X samples retain 0 for turns and 0.30 for forward trajectories.
+    # Include slow forward trajectories (0.05 .. 0.25m/s), not just stop/full
+    # speed. All candidates still pass DWB's real footprint collision checks.
     # Do not clamp a planned slow command upward in the actuator bridge.
     follow.update(min_vel_x=0.0, max_vel_x=LINEAR_SPEED,
                   min_vel_y=0.0, max_vel_y=0.0, max_vel_theta=TRACKING_YAW_SPEED,
                   min_speed_xy=0.0, max_speed_xy=LINEAR_SPEED,
                   min_speed_theta=0.0, vx_samples=FORWARD_SAMPLES, vy_samples=1,
+                  vtheta_samples=ANGULAR_SAMPLES,
                   trajectory_generator_name='dwb_plugins::StandardTrajectoryGenerator',
                   limit_vel_cmd_in_traj=False, sim_time=TRAJECTORY_TIME,
                   acc_lim_x=LINEAR_ACCELERATION, acc_lim_y=LINEAR_ACCELERATION,

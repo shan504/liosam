@@ -38,6 +38,7 @@ from relocalization import Relocalizer, RecoveryConfig
 from localization_recovery import RecoveryWorker, RecoveryJob
 
 INITIAL_POSE_WAIT_SECONDS = 10.0
+NAVIGATION_TF_PERIOD = 0.02
 
 
 def transform_matrix(transform):
@@ -215,10 +216,7 @@ class Mapper(Node):
         # Cloud and TF arrive on independent DDS topics. Retry asynchronously
         # at the original scan timestamp instead of discarding fresh packets.
         self.create_timer(0.05, self.process_pending_clouds)
-        # Nav2 needs transforms between GICP results, not only at the older
-        # scan stamp after a registration finishes. Hold only a fresh accepted
-        # map correction, timestamped by actual odometry (never future-dated).
-        self.create_timer(0.05, self.publish_correction)
+        self.configure_navigation_tf()
         self.create_timer(self.p['map_publish_period'], self.publish_map)
         self.registration_timer = self.create_timer(self.p['registration_period'], self.process,
                                                     callback_group=MutuallyExclusiveCallbackGroup())
@@ -895,18 +893,45 @@ class Mapper(Node):
             self.loop_worker.close()
         return super().destroy_node()
 
+    def configure_navigation_tf(self):
+        # RotationShim asks for a current map->base_footprint transform and
+        # waits only 100ms in Humble. Map serialization and cloud callbacks
+        # must not occupy this callback group. The timer also supports the
+        # original TF-only input; /odom refreshes the SAME measured TF cache
+        # directly, without waiting for a second DDS /tf delivery.
+        self.navigation_tf_group = MutuallyExclusiveCallbackGroup()
+        odom_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(Odometry, '/odom', self.receive_navigation_odometry,
+                                 odom_qos, callback_group=self.navigation_tf_group)
+        self.create_timer(NAVIGATION_TF_PERIOD, self.publish_correction,
+                          callback_group=self.navigation_tf_group)
+
+    def receive_navigation_odometry(self, message):
+        if (self.external_backend or message.header.frame_id != 'odom' or
+                message.child_frame_id != 'base_link'):
+            return
+        stamp = Time.from_msg(message.header.stamp)
+        age = (self.get_clock().now()-stamp).nanoseconds/1e9
+        if stamp.nanoseconds <= 0 or not 0 <= age <= self.p['localization_odom_timeout']:
+            return
+        odom = TransformStamped()
+        odom.header = message.header
+        odom.child_frame_id = message.child_frame_id
+        p, q = message.pose.pose.position, message.pose.pose.orientation
+        odom.transform.translation.x,odom.transform.translation.y,odom.transform.translation.z = p.x,p.y,p.z
+        odom.transform.rotation = q
+        try:
+            transform_matrix(odom.transform)
+        except ValueError:
+            return
+        self.buffer.set_transform(odom, 'native_odometry_subscription')
+        self.publish_correction()
+
     def publish_correction(self):
         if self.external_backend:
             # Accepted-scan callback owns gicp_odom->odom in this mode.
             return
         with self.lock:
-            if self.p['mode'] == 'localization':
-                valid, _, _ = self.localization_readiness()
-            else:
-                valid = (self.seeded and self.last_accepted is not None and
-                         0 <= time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
-            if not valid:
-                return
             try:
                 odom = self.buffer.lookup_transform('odom','base_link',Time())
             except TransformException:
@@ -915,7 +940,15 @@ class Mapper(Node):
             age = (self.get_clock().now()-stamp).nanoseconds/1e9
             if not -0.1 <= age <= self.p['validity_timeout']:
                 return
-            if self.last_tf_stamp is not None and stamp.nanoseconds <= self.last_tf_stamp:
+            if (self.last_tf_stamp is not None and
+                    stamp.nanoseconds-self.last_tf_stamp < round(NAVIGATION_TF_PERIOD*1e9)):
+                return
+            if self.p['mode'] == 'localization':
+                valid, _, _ = self.localization_readiness()
+            else:
+                valid = (self.seeded and self.last_accepted is not None and
+                         0 <= time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
+            if not valid:
                 return
             transform = TransformStamped()
             transform.header.stamp = odom.header.stamp

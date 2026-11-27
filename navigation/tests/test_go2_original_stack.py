@@ -94,11 +94,42 @@ class OriginalNavigationIntegration(unittest.TestCase):
             self.assertEqual(follow['plugin'], 'nav2_rotation_shim_controller::RotationShimController')
             self.assertEqual(follow['primary_controller'], 'dwb_core::DWBLocalPlanner')
             self.assertIn('ObstacleFootprint', follow['critics'])
+            # Test the generated runtime file, not the unused legacy YAML.
+            # The controller may choose a slow collision-free approach and
+            # its deliberate turns must survive both downstream speed caps.
+            self.assertEqual(follow['vx_samples'], 7)
+            self.assertEqual(follow['vtheta_samples'], 31)
+            self.assertEqual(follow['max_vel_x'], .30)
+            self.assertEqual(follow['max_vel_theta'], .60)
+            self.assertEqual(follow['rotate_to_heading_angular_vel'], .80)
+            self.assertFalse(follow['closed_loop'])
+            smoother = config['velocity_smoother']['ros__parameters']
+            self.assertGreaterEqual(smoother['max_velocity'][2], follow['rotate_to_heading_angular_vel'])
+            self.assertLessEqual(smoother['min_velocity'][2], -follow['rotate_to_heading_angular_vel'])
+            self.assertEqual(smoother['max_accel'][2], follow['max_angular_accel'])
+            # Acceptance and stopping rules cannot be loosened by turn tuning.
+            self.assertEqual(config['controller_server']['ros__parameters']['progress_checker']['movement_time_allowance'], 10.)
+            self.assertNotIn('RotateToGoal', follow['critics'])
             bt_path = Path(config['bt_navigator']['ros__parameters']['default_nav_to_pose_bt_xml'])
             installed = ORIGINAL / bt_path.relative_to('/opt/go2_project')
             recovery = ET.parse(installed).find('./BehaviorTree/RecoveryNode')
             self.assertEqual(recovery.get('number_of_retries'), '3')
             self.assertEqual(recovery.find('Wait').get('wait_duration'), '2')
+
+    def test_turn_envelope_reaches_bridge_without_amplifying_small_commands(self):
+        motion = load_file('motion_limits', ORIGINAL/'go2_3d/motion_profile.py')
+        logic = load_file('command_logic', ORIGINAL/'patches/dds/bridge_logic.py')
+        gate = logic.CommandGate()
+        gate.max_linear, gate.max_yaw = motion.LINEAR_SPEED, motion.YAW_SPEED
+        gate.set_enabled(True)
+        for yaw in [-motion.PATH_TURN_SPEED, -.173684, 0., .173684, motion.PATH_TURN_SPEED]:
+            with self.subTest(yaw=yaw):
+                gate.receive(0., 0., yaw, 10.)
+                action, command = gate.poll(10.01, True)
+                self.assertEqual(action, 'move')
+                self.assertAlmostEqual(command[2], yaw)
+        gate.set_enabled(False)
+        self.assertNotEqual(gate.poll(10.02, True)[0], 'move')
 
     def test_original_operator_layout_endpoints(self):
         layout = json.loads((NAV/'foxglove.json').read_text())
