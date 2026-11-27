@@ -23,6 +23,16 @@ sudo docker exec go2-lio-nav bash -lc 'source /opt/ros/humble/setup.bash && sour
 
 ## 移植范围
 
+### GICP 定位超时修复（所有地图共用）
+
+`Registration result too old` 表示结果未通过扫描源戳或本机接收时间的 1 秒时效检查，并不等于对应点搜索距离不够。定位模式使用静态地图空间索引、带法向与正则化协方差的局部目标缓存，以及有点数预算的粗、精 GICP；相同位置不再重复对整张地图筛选、计算目标法向。默认定位源点不超过 6000、精目标不超过 20000，粗目标不超过 8000；仅求解输入降采样，保存的完整地图和建图密度不变。
+
+初始化对应点距离由 0.70 m 扩至 1.20 m，初始位姿修正上限由 2 m / 约 46° 扩至 3 m / 90°，最终仍用 0.70 m 对应点距离、原有重叠率和 0.20 m RMSE 上限验证。3 m / 90° 是允许修正上限，不保证在任意这样大的初值误差下都能收敛，也不是全图位置识别。仍从该地图自己的起点/朝向启动，或发送实际 `/initialpose`。正常跟踪的创新、静止漂移、原生里程计、恢复确认和运动授权检查保留。
+
+加载地图时预热起点局部目标；定位时完整静态 `/map_cloud` 仅发布一次，通过原有可靠 `TRANSIENT_LOCAL` QoS 向后接入订阅者提供完整地图，避免每两秒重新打包和传输。活动建图继续发布更新。超时日志现在分别给出 `processing_time`（本轮计算时间）、`source_age`（实际贡献扫描接收后时间）、`stamp_age`（源戳距现在时间）和参与求解点数；未接受的结果不会刷新定位有效期。
+
+方法参考 Open3D 官方 [粗到细配准](https://www.open3d.org/docs/release/tutorial/t_pipelines/t_icp_registration.html#multi-scale-icp-example) 和 [收敛条件](https://www.open3d.org/docs/0.14.1/python_api/open3d.pipelines.registration.ICPConvergenceCriteria.html)。使用现有 Python/Open3D，无需编译 C++。机器人 ARM64 的实时耗时和实际场景收敛需复测；桌面合成几何验证不替代实机结果。
+
 原代码来自 [shan504/go2 的 40a836d](https://github.com/shan504/go2/tree/40a836d513f5ce4c8938a3bde4713dc83388f20c)。导航加载 `original_go2/go2_3d/stack.launch.py`，用原 `prepare.py` 和 `motion_profile.py` 从镜像的 SDK 配置生成实际运行参数。GICP、NavFn A*、RotationShim 和 DWB、行为树、去噪和膨胀、航点队列和重试均由原实现运行。全局和局部膨胀半径均为原版的 0.05 m，使用原机身足迹核对碰撞。
 
 输入采用 Go2 本体 `/utlidar/robot_odom`。外置 MID‑360S 根据建图时保存的安装外参和带时间戳的本体位姿完成去畸变，在 `base_link` 发布 `/point_cloud2`。运动桥订阅这两路已对时的输入，复用旧桥的定位门控、速度限制和停车流程。Foxglove 端口使用 8766，模型话题为 `/go2_visual/live/model_mesh`，导航画面使用原 Go2 前置相机；建图画面继续使用 D435i。

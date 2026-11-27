@@ -27,13 +27,16 @@ class Match:
 
 def align(source, target, guess, correspondence=0.7, min_fitness=0.55,
           max_rmse=0.20, max_translation=0.6, max_rotation=0.35,
-          iterations=35, innovation_guess=None):
+          iterations=35, innovation_guess=None,
+          relative_fitness=1e-6, relative_rmse=1e-6):
     if len(source.points) < 100 or len(target.points) < 100:
         return Match(False, guess.copy(), 0.0, float('inf'), 'too few points')
     result = o3d.pipelines.registration.registration_generalized_icp(
         source, target, correspondence, guess,
         o3d.pipelines.registration.TransformationEstimationForGeneralizedICP(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=iterations))
+        o3d.pipelines.registration.ICPConvergenceCriteria(
+            relative_fitness=relative_fitness, relative_rmse=relative_rmse,
+            max_iteration=iterations))
     reference = guess if innovation_guess is None else innovation_guess
     delta = np.linalg.inv(reference) @ result.transformation
     finite = np.isfinite(result.transformation).all()

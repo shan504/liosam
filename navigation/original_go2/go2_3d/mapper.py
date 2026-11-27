@@ -36,6 +36,7 @@ from mapping_loop import MappingLoopWorker
 from mapping_rebuild import MappingObservation
 from relocalization import Relocalizer, RecoveryConfig
 from localization_recovery import RecoveryWorker, RecoveryJob
+from localization_target import LocalizationTarget, bounded_cloud
 
 INITIAL_POSE_WAIT_SECONDS = 10.0
 NAVIGATION_TF_PERIOD = 0.02
@@ -69,7 +70,13 @@ class Mapper(Node):
                         registration_period=0.5, validity_timeout=1.0,
                         correspondence_distance=0.7, min_fitness=0.55, max_rmse=0.20,
                         max_translation=0.6, max_rotation=0.35,
-                        localization_voxel_size=0.10, localization_correspondence=0.70,
+                        localization_voxel_size=0.15, localization_correspondence=0.70,
+                        localization_coarse_voxel=0.30,
+                        localization_max_source_points=6000, localization_max_target_points=20000,
+                        localization_initial_correspondence=1.20,
+                        localization_initial_max_translation=3.0,
+                        localization_initial_max_rotation_degrees=90.0,
+                        localization_coarse_iterations=20, localization_fine_iterations=20,
                         localization_max_translation=1.0, localization_max_rotation_degrees=45.0,
                         localization_min_fitness=0.20, localization_max_rmse=0.20,
                         stationary_translation_limit=0.35, stationary_rotation_limit_degrees=12.0,
@@ -112,9 +119,18 @@ class Mapper(Node):
                      'localization_correspondence', 'localization_max_translation',
                      'localization_max_rotation_degrees', 'validity_timeout',
                      'localization_hold_timeout', 'localization_hold_distance',
-                     'localization_hold_rotation_degrees', 'localization_odom_timeout'):
+                     'localization_hold_rotation_degrees', 'localization_odom_timeout',
+                     'localization_voxel_size', 'localization_coarse_voxel',
+                     'localization_initial_correspondence', 'localization_initial_max_translation',
+                     'localization_initial_max_rotation_degrees', 'submap_radius'):
             if not np.isfinite(self.p[name]) or self.p[name] <= 0:
                 raise ValueError(f'{name} must be finite and positive')
+        for name in ('localization_max_source_points', 'localization_max_target_points',
+                     'localization_coarse_iterations', 'localization_fine_iterations'):
+            value = self.p[name]
+            minimum = 100 if name.endswith('points') else 1
+            if isinstance(value, bool) or not np.isfinite(value) or int(value) != value or value < minimum:
+                raise ValueError(f'{name} must be an integer >= {minimum}')
         map_name(self.p['map_name'])
         self.lock = threading.RLock()
         self.generation = 0
@@ -151,6 +167,8 @@ class Mapper(Node):
         self._points = np.empty((0,3))
         self._registration_points = np.empty((0,3))
         self.localization_points = np.empty((0,3))
+        self.localization_target = None
+        self.static_map_published = False
         self.grid = ObservedGrid(self.p['grid_resolution'])
         self.map_metadata = {}
         self.saved_start_pose = None
@@ -173,8 +191,24 @@ class Mapper(Node):
             self._points = np.asarray(o3d.io.read_point_cloud(str(directory/'map.pcd')).points).copy()
             if len(self.points) < 100:
                 raise ValueError('Missing/empty 3D map.pcd; localization cannot start')
-            self._registration_points = np.asarray(cloud(self.points,self.p['voxel_size']).points).copy()
             self.localization_points = np.asarray(cloud(self.points,self.p['localization_voxel_size']).points).copy()
+            self.localization_target = LocalizationTarget(
+                self.localization_points, radius=self.p['submap_radius'],
+                coarse_voxel=self.p['localization_coarse_voxel'],
+                fine_voxel=self.p['localization_voxel_size'],
+                fine_limit=self.p['localization_max_target_points'])
+            if self.saved_start_pose is not None:
+                # Build the first immutable target before subscribing to live
+                # scans, so cold-start normal estimation does not age a scan.
+                self.localization_target.get(self.saved_start_pose[:3,3])
+            self.get_logger().info(
+                'Localization: cached bounded GICP; initial correspondence '
+                f'{self.p["localization_initial_correspondence"]:.2f}m, initial correction limit '
+                f'{self.p["localization_initial_max_translation"]:.1f}m/'
+                f'{self.p["localization_initial_max_rotation_degrees"]:.0f}deg; '
+                f'source/target limits {self.p["localization_max_source_points"]}/'
+                f'{self.p["localization_max_target_points"]}; freshness '
+                f'{self.p["validity_timeout"]:.1f}s; final quality checks retained')
             self.get_logger().info('Loaded 3D map; automatic initialization from saved mapping start'
                                    if self.p['auto_initialize'] and self.p['initial_from_map_start'] else
                                    'Loaded 3D map; waiting for configured or manual /initialpose')
@@ -545,6 +579,7 @@ class Mapper(Node):
 
     def process(self):
         started = time.monotonic()
+        target_count = registration_count = 0
         with self.lock:
             if self.external_backend and (not self.backend_ready or not all(
                     publisher.get_subscription_count() for publisher in (
@@ -573,9 +608,7 @@ class Mapper(Node):
             generation, correction, seeded = self.generation, self.correction.copy(), self.seeded
             # Arrays are replaced, never edited in place; snapshot references
             # stay valid while callbacks replace the current map.
-            points = self._registration_points
             map_count = self.map_point_count
-            localization_points = self.localization_points
             history = list(self.history)
             previous_odom = self.accepted_odom
             previous_match = (self.accepted_match_correction.copy()
@@ -605,7 +638,9 @@ class Mapper(Node):
                     source_received <= self.last_accepted):
                 raise ScanMatchUnavailable('No new contributing scan; previous geometry cannot renew acceptance')
             input_points = filter_points(np.vstack(frames))
-            source = cloud(input_points, self.p['voxel_size'])
+            source = (bounded_cloud(input_points, self.p['localization_voxel_size'],
+                                    self.p['localization_max_source_points'])
+                      if self.p['mode'] == 'localization' else cloud(input_points, self.p['voxel_size']))
             registration_count = len(source.points)
             if len(source.points) < 100:
                 raise ScanMatchUnavailable('Too few finite/range-filtered cloud points')
@@ -621,18 +656,13 @@ class Mapper(Node):
                 # direction. Identity here had baked initial body roll/pitch
                 # into the entire map and its ground/costmap projection.
                 matched, fitness, rmse = first_map_pose(odom_base), 1.0, 0.0
-            elif self.p['mode'] == 'mapping' or not seeded:
-                if self.mapping_store is not None:
-                    # Only nearby coarse blocks participate in registration;
-                    # all fine blocks remain in the complete saved map.
-                    nearby = self.mapping_store.nearby(guess[:3,3], self.p['submap_radius'])
-                else:
-                    nearby = points[np.linalg.norm(points-guess[:3,3],axis=1) < self.p['submap_radius']]
+            elif self.p['mode'] == 'mapping':
+                # Mapping keeps its original resolution and acceptance limits.
+                nearby = self.mapping_store.nearby(guess[:3,3], self.p['submap_radius'])
                 target = cloud(nearby, None)
                 result = align(source, target, guess,
                                correspondence=self.p['correspondence_distance'],
-                               min_fitness=(self.p['localization_min_fitness']
-                                            if self.p['mode'] == 'localization' else self.p['min_fitness']),
+                               min_fitness=self.p['min_fitness'],
                                max_rmse=self.p['max_rmse'],
                                max_translation=self.p['max_translation'] if seeded else 2.0,
                                max_rotation=self.p['max_rotation'] if seeded else 0.8)
@@ -643,20 +673,32 @@ class Mapper(Node):
                 # guess rather than starting from a coarse, potentially aliased match.
                 matched = guess
             if self.p['mode'] == 'localization':
-                nearby = localization_points[np.linalg.norm(localization_points-guess[:3,3],axis=1) < self.p['submap_radius']]
-                expected = transform_points(input_points,matched)
-                margin = 2*self.p['localization_correspondence']
-                lower,upper = expected.min(axis=0)-margin,expected.max(axis=0)+margin
-                nearby = nearby[np.all((nearby >= lower)&(nearby <= upper),axis=1)]
-                fine_source = cloud(input_points,self.p['localization_voxel_size'])
-                registration_count = len(fine_source.points)
-                result = align(fine_source,cloud(nearby,None),matched,
+                # Cache indexed local targets and their GICP covariances.
+                # The full saved/display map is never cropped or overwritten.
+                targets = self.localization_target.get(guess[:3,3])
+                target_count = len(targets.fine.points)
+                if not seeded:
+                    coarse_source = bounded_cloud(input_points, self.p['localization_coarse_voxel'],
+                                                  min(3000, self.p['localization_max_source_points']))
+                    coarse = align(coarse_source, targets.coarse, guess,
+                                   correspondence=self.p['localization_initial_correspondence'],
+                                   min_fitness=self.p['localization_min_fitness'], max_rmse=0.60,
+                                   max_translation=self.p['localization_initial_max_translation'],
+                                   max_rotation=np.deg2rad(self.p['localization_initial_max_rotation_degrees']),
+                                   iterations=self.p['localization_coarse_iterations'],
+                                   relative_fitness=1e-4, relative_rmse=1e-4)
+                    require_match(coarse, 'Initial coarse GICP ')
+                    matched = coarse.transform
+                result = align(source, targets.fine, matched,
                                correspondence=self.p['localization_correspondence'],
                                min_fitness=self.p['localization_min_fitness'],
                                max_rmse=min(self.p['max_rmse'],self.p['localization_max_rmse']),
-                               max_translation=self.p['localization_max_translation'] if seeded else 2.0,
-                               max_rotation=np.deg2rad(self.p['localization_max_rotation_degrees']) if seeded else 0.8,
-                               iterations=25,innovation_guess=guess)
+                               max_translation=(self.p['localization_max_translation'] if seeded else
+                                                self.p['localization_initial_max_translation']),
+                               max_rotation=np.deg2rad(self.p['localization_max_rotation_degrees'] if seeded else
+                                                      self.p['localization_initial_max_rotation_degrees']),
+                               iterations=self.p['localization_fine_iterations'], innovation_guess=guess,
+                               relative_fitness=1e-4, relative_rmse=1e-4)
                 require_match(result, 'Fine GICP ')
                 matched,fitness,rmse = result.transform,result.fitness,result.rmse
             new_correction = matched@np.linalg.inv(odom_base)
@@ -690,7 +732,11 @@ class Mapper(Node):
             age = (self.get_clock().now()-Time.from_msg(source_stamp)).nanoseconds/1e9
             if (not 0 <= time.monotonic()-source_received <= self.p['validity_timeout'] or
                     not -0.1 <= age <= self.p['validity_timeout']):
-                raise ScanMatchUnavailable('Registration result too old; reduce cloud/submap size or processing load')
+                raise ScanMatchUnavailable(
+                    f'Registration result too old; processing_time={time.monotonic()-started:.3f}s '
+                    f'source_age={time.monotonic()-source_received:.3f}s stamp_age={age:.3f}s '
+                    f'limit={self.p["validity_timeout"]:.3f}s '
+                    f'source_points={registration_count} target_points={target_count}')
             # Prepare every fallible map/grid/payload calculation before
             # committing pose or acceptance. A failed keyframe cannot move
             # the map frame while its geometry remains at the old pose.
@@ -725,8 +771,11 @@ class Mapper(Node):
             age = (self.get_clock().now()-Time.from_msg(source_stamp)).nanoseconds/1e9
             if (not 0 <= time.monotonic()-source_received <= self.p['validity_timeout'] or
                     not -0.1 <= age <= self.p['validity_timeout']):
-                raise ScanMatchUnavailable('Registration result too old after map update preparation; '
-                                           'no pose or map changes committed')
+                raise ScanMatchUnavailable(
+                    f'Registration result too old after output preparation; '
+                    f'processing_time={time.monotonic()-started:.3f}s '
+                    f'source_age={time.monotonic()-source_received:.3f}s stamp_age={age:.3f}s '
+                    f'limit={self.p["validity_timeout"]:.3f}s; no pose or map changes committed')
             with self.lock:
                 if generation != self.generation:
                     return
@@ -972,6 +1021,11 @@ class Mapper(Node):
     def publish_map(self):
         if self.external_backend and not self.map_pub.get_subscription_count():
             return
+        # Localization loads one immutable map. TRANSIENT_LOCAL delivers the
+        # retained complete cloud to late subscribers without rebuilding and
+        # retransmitting it every two seconds alongside real-time GICP.
+        if self.p['mode'] == 'localization' and self.static_map_published:
+            return
         with self.lock:
             points = self.points
             generation = self.generation
@@ -981,6 +1035,7 @@ class Mapper(Node):
             with self.lock:
                 if generation == self.generation:
                     self.map_pub.publish(message)
+                    self.static_map_published = self.p['mode'] == 'localization'
 
     def save_map(self, request, response):
         if self.external_backend:

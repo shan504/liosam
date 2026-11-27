@@ -41,7 +41,18 @@ go2_gicp:
     max_rotation: 0.35
     # Match accumulated patrol scans with fewer registration points. Retain
     # the complete saved map and real odometry; mapping quality is unchanged.
-    localization_voxel_size: 0.10
+    # Solver-only budgets/cache: all maps retain their complete original PCD.
+    localization_voxel_size: 0.15
+    localization_coarse_voxel: 0.30
+    localization_max_source_points: 6000
+    localization_max_target_points: 20000
+    localization_coarse_iterations: 20
+    localization_fine_iterations: 20
+    # Wider initial capture around saved start/manual initialpose. This is
+    # not a guaranteed global search; the final fine residual still must pass.
+    localization_initial_correspondence: 1.20
+    localization_initial_max_translation: 3.0
+    localization_initial_max_rotation_degrees: 90.0
     localization_correspondence: 0.70
     # Bound scan-to-odometry residuals during patrol turns separately from
     # mapping. Actual cumulative turning still comes from timestamped odom.
