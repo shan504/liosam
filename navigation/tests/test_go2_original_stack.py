@@ -95,15 +95,33 @@ class OriginalNavigationIntegration(unittest.TestCase):
             self.assertEqual(follow['primary_controller'], 'dwb_core::DWBLocalPlanner')
             self.assertIn('ObstacleFootprint', follow['critics'])
             # Test the generated runtime file, not the unused legacy YAML.
-            # The controller may choose a slow collision-free approach and
-            # its deliberate turns must survive both downstream speed caps.
-            self.assertEqual(follow['vx_samples'], 7)
+            # Restore the original stop/turn-or-0.30m/s forward candidates.
+            # Verify the generated file overrides the SDK's legacy 0.15 cap
+            # without removing zero-X turning or the acceleration ramp.
+            self.assertEqual(follow['vx_samples'], 2)
+            self.assertEqual(follow['min_vel_x'], 0.)
+            self.assertEqual(follow['min_speed_xy'], 0.)
+            self.assertEqual(follow['max_speed_xy'], .30)
+            self.assertEqual(follow['trajectory_generator_name'], 'dwb_plugins::StandardTrajectoryGenerator')
+            self.assertFalse(follow['limit_vel_cmd_in_traj'])
+            self.assertTrue(follow['debug_trajectory_details'])
+            self.assertEqual(follow['acc_lim_x'], .40)
+            self.assertEqual(follow['decel_lim_x'], -.40)
+            # From rest the simulation window must reach the 0.30 candidate;
+            # a one-tick dynamic window would silently restore weak commands.
+            self.assertGreaterEqual(follow['acc_lim_x'] * follow['sim_time'], .30)
             self.assertEqual(follow['vtheta_samples'], 31)
             self.assertEqual(follow['max_vel_x'], .30)
             self.assertEqual(follow['max_vel_theta'], .60)
             self.assertEqual(follow['rotate_to_heading_angular_vel'], .80)
             self.assertFalse(follow['closed_loop'])
             smoother = config['velocity_smoother']['ros__parameters']
+            self.assertEqual(smoother['feedback'], 'OPEN_LOOP')
+            self.assertEqual(smoother['smoothing_frequency'], 20.)
+            self.assertEqual(smoother['max_velocity'][0], .30)
+            self.assertEqual(smoother['min_velocity'][0], 0.)
+            self.assertEqual(smoother['max_accel'][0], follow['acc_lim_x'])
+            self.assertEqual(smoother['max_decel'][0], follow['decel_lim_x'])
             self.assertGreaterEqual(smoother['max_velocity'][2], follow['rotate_to_heading_angular_vel'])
             self.assertLessEqual(smoother['min_velocity'][2], -follow['rotate_to_heading_angular_vel'])
             self.assertEqual(smoother['max_accel'][2], follow['max_angular_accel'])
@@ -130,6 +148,27 @@ class OriginalNavigationIntegration(unittest.TestCase):
                 self.assertAlmostEqual(command[2], yaw)
         gate.set_enabled(False)
         self.assertNotEqual(gate.poll(10.02, True)[0], 'move')
+
+    def test_forward_speed_ramp_and_stop_survive_bridge(self):
+        motion = load_file('forward_motion_limits', ORIGINAL/'go2_3d/motion_profile.py')
+        logic = load_file('forward_command_logic', ORIGINAL/'patches/dds/bridge_logic.py')
+        gate = logic.CommandGate(max_linear=motion.LINEAR_SPEED, max_yaw=motion.YAW_SPEED)
+        gate.set_enabled(True)
+        # Representative smoother ramp, cruise, slowdown, then stop. The
+        # actuator bridge must neither retain an old cruise nor boost a ramp.
+        for i, vx in enumerate([.02, .18, .30, .30, .18, .02, 0.]):
+            now = 10. + i * .05
+            gate.receive(vx, 0., 0., now)
+            action, command = gate.poll(now + .01, True)
+            self.assertEqual(action, 'move')
+            self.assertEqual(command, (vx, 0., 0.))
+        gate.receive(.30, 0., 0., 11.)
+        self.assertEqual(gate.poll(11.01, True), ('move', (.30, 0., 0.)))
+        self.assertEqual(gate.poll(11.02, False), ('stop', None))
+        self.assertEqual(gate.poll(11.03, True), (None, None))
+        gate.receive(.30, 0., 0., 12.)
+        self.assertEqual(gate.poll(12.01, True)[0], 'move')
+        self.assertEqual(gate.poll(12.6, True), ('stop', None))
 
     def test_original_operator_layout_endpoints(self):
         layout = json.loads((NAV/'foxglove.json').read_text())

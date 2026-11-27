@@ -91,9 +91,9 @@ def main(mode='mapping'):
         plugins.append('wait')
     behavior.setdefault('wait', {})['plugin'] = 'nav2_behaviors/Wait'
     (output/'nav2_3d.yaml').write_text(yaml.safe_dump(nav,sort_keys=False))
-    print(f'导航运动参数：前进上限 {LINEAR_SPEED:.2f}m/s，跟踪转向上限 '
+    print(f'导航运动参数：前进候选 0/{LINEAR_SPEED:.2f}m/s（原 Go2 配置，起停保留加减速），跟踪转向上限 '
           f'{TRACKING_YAW_SPEED:.2f}rad/s，路径对准 {PATH_TURN_SPEED:.2f}rad/s；'
-          '本体位姿驱动 TF，保留足迹碰撞检查。')
+          '本体位姿驱动 TF，保留足迹碰撞检查；无有效轨迹时打印拒绝原因。')
     if mode in ('localization', 'navigation'):
         prepare_navigation_grid('/maps', '/runtime/navigation_map')
 
