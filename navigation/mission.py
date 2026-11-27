@@ -58,7 +58,8 @@ class Mission(Node):
         self.create_subscription(PoseStamped, '/goal_pose', self.add_goal, 100)
         self.create_subscription(Bool, '/control/enable', self.enable, 4)
         self.create_subscription(Empty, '/navigation/resume', lambda _: self.arm(), 4)
-        self.create_subscription(Empty, '/navigation/cancel', lambda _: self.cancel(), 4)
+        self.create_subscription(Empty, '/navigation/cancel', lambda _: self.cancel_current(), 4)
+        self.create_subscription(Empty, '/navigation/clear_queue', lambda _: self.cancel(), 4)
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose',
                                  lambda _: self.pause('重新设置初始位姿，待定位稳定再启用'), 1)
         self.create_subscription(Bool, '/localization/valid', self.validity, 1)
@@ -203,6 +204,15 @@ class Mission(Node):
     def cancel(self):
         self.route.clear()
         self.pause('已取消并清空队列')
+        self.draw()
+
+    def cancel_current(self):
+        if self.active is None:
+            self.pause('当前没有正在执行的目标，已暂停并保留待执行航点')
+            return
+        if self.route and self.route[0] is self.active:
+            self.route.popleft()
+        self.pause(f'已请求取消 #{self.active[0]}，其余航点保留；重新启用后继续')
         self.draw()
 
     def pause(self, reason):

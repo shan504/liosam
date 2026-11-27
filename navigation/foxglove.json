@@ -229,8 +229,8 @@
       "datatype": "std_msgs/msg/Bool",
       "value": "{\"data\":true}",
       "advancedView": true,
-      "buttonText": "执行航点队列",
-      "buttonTooltip": "定位有效后，执行已选择的航点",
+      "buttonText": "启用运动",
+      "buttonTooltip": "开始或恢复已排队的航点",
       "buttonColor": "#227b3a"
     },
     "Publish!g2stop": {
@@ -238,8 +238,8 @@
       "datatype": "std_msgs/msg/Bool",
       "value": "{\"data\":false}",
       "advancedView": true,
-      "buttonText": "停止运动",
-      "buttonTooltip": "暂停运动并保留航点队列",
+      "buttonText": "停止运动＋取消导航",
+      "buttonTooltip": "立即暂停运动，取消活动任务，保留全部未完成航点",
       "buttonColor": "#c52430"
     },
     "Publish!g2cancel": {
@@ -247,8 +247,8 @@
       "datatype": "std_msgs/msg/Empty",
       "value": "{}",
       "advancedView": true,
-      "buttonText": "取消路线",
-      "buttonTooltip": "取消路线",
+      "buttonText": "取消当前目标",
+      "buttonTooltip": "暂停并移除活动航点，后续航点保留",
       "buttonColor": "#b76b12"
     },
     "RawMessages!g2valid": {
@@ -272,13 +272,14 @@
       "diffTopicPath": "",
       "showFullMessageForDiff": false
     },
-    "Publish!g2resume": {
-      "topicName": "/navigation/resume",
+    "Publish!g2clear": {
+      "topicName": "/navigation/clear_queue",
       "datatype": "std_msgs/msg/Empty",
       "value": "{}",
       "advancedView": true,
-      "buttonText": "恢复航点队列",
-      "buttonColor": "#326bb7"
+      "buttonText": "清空整条队列",
+      "buttonColor": "#326bb7",
+      "buttonTooltip": "停下并清空所有未完成航点"
     },
     "RawMessages!g2control": {
       "topicPath": "/control/status",
@@ -314,7 +315,7 @@
           "first": "Publish!g2stop",
           "second": {
             "first": "Publish!g2cancel",
-            "second": "Publish!g2resume",
+            "second": "Publish!g2clear",
             "direction": "column",
             "splitPercentage": 50
           },

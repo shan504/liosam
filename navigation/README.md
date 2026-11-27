@@ -8,7 +8,7 @@
 
 1. 如果从建图起点同朝向出发，等待自动定位。在其他位置出发时，在 Foxglove 左侧的“估计位姿”工具指定机器狗在图上的位置和朝向。GICP 是局部配准，初始估计要接近实际机身。
 2. 使用终端打印的 Wi-Fi WebSocket 地址，导入本目录的 `foxglove.json`。等定位有效且 Nav2 就绪，先在右侧导航视图选一个空闲位置并指定到达朝向；再添加其余航点，编号按加入顺序排列。
-3. “执行航点队列”显式启用运动。Nav2 逐个报告成功后才取下一点。“停止运动”保留未完成队列，“取消路线”清空队列。定位丢失、传感器超时或行动失败会暂停。确认定位及现场条件后，点“恢复航点队列”重试当前点。Ctrl+C 结束本次导航。
+3. 点击“启用运动”开始或恢复队列。Nav2 按顺序执行，每次只接受一个目标。“停止运动＋取消导航”停下机器狗，撤销本次 Nav2 任务，保留当前及后续航点。“取消当前目标”停下并移除活动航点，剩余航点等手动启用。需要放弃全部航点时点“清空整条队列”。操作结果显示在 `/operator/status` 和 `/control/status`。Ctrl+C 结束导航。
 4. 需要数值输入时，可在另一个终端使用下面的命令；将 `X,Y,YAW` 换为这张地图的实际目标，单位为米、米、度。该命令只排队。
 ```bash
 sudo docker exec go2-lio-nav bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && python3 /repo/navigation/waypoints.py -- "$@"' bash X1,Y1,YAW1 X2,Y2,YAW2

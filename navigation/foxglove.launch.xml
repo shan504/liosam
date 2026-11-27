@@ -3,7 +3,7 @@
   <include file="$(find-pkg-share foxglove_bridge)/launch/foxglove_bridge_launch.xml">
     <arg name="port" value="$(var port)"/>
     <arg name="capabilities" value="[clientPublish,connectionGraph]"/>
-    <arg name="topic_whitelist" value="['^/(tf|tf_static|map|odom|plan|local_plan|map_cloud|initialpose|goal_pose)$','^/(local_costmap|global_costmap)/(costmap|published_footprint)$','^/(localization/(valid|status)|operator/status|control/(enable|status)|navigation/(scan|cloud|startup_status|waypoints|cancel|resume))$']"/>
-    <arg name="client_topic_whitelist" value="['^/(initialpose|goal_pose|control/enable|navigation/cancel|navigation/resume)$']"/>
+    <arg name="topic_whitelist" value="['^/(tf|tf_static|map|odom|plan|local_plan|map_cloud|initialpose|goal_pose)$','^/(local_costmap|global_costmap)/(costmap|published_footprint)$','^/(localization/(valid|status)|operator/status|control/(enable|status)|navigation/(scan|cloud|startup_status|waypoints|cancel|resume|clear_queue))$']"/>
+    <arg name="client_topic_whitelist" value="['^/(initialpose|goal_pose|control/enable|navigation/(cancel|resume|clear_queue))$']"/>
   </include>
 </launch>
