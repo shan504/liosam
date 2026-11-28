@@ -10,6 +10,7 @@ import json
 import math
 import re
 import time
+from localization_timing import LOCALIZATION_HEARTBEAT_TIMEOUT, localization_is_fresh
 
 
 WINDOW_SECONDS = 20.0
@@ -220,10 +221,13 @@ class ControlHistory:
             odometry=odom, local_costmap=self._grid_summary(now, ros_now, odom), plan=plan,
             latest={name: dict(available=name in self.statuses,
                     receipt_age_s=age(now, self.statuses[name][0]) if name in self.statuses else None,
-                    fresh=(name in self.statuses and age(now, self.statuses[name][0]) <= limit),
+                    fresh=(name in self.statuses and
+                           (localization_is_fresh(True, self.statuses[name][0], now)
+                            if name in ('localization_valid', 'localization_state')
+                            else age(now, self.statuses[name][0]) <= limit)),
                     text=self.statuses[name][1] if name in self.statuses else None)
-                    for name, limit in (('control', 3.0), ('localization_valid', 0.5),
-                                        ('localization_state', 0.5), ('startup', self.window),
+                    for name, limit in (('control', 3.0), ('localization_valid', LOCALIZATION_HEARTBEAT_TIMEOUT),
+                                        ('localization_state', LOCALIZATION_HEARTBEAT_TIMEOUT), ('startup', self.window),
                                         ('operator', self.window))})
 
 
@@ -685,7 +689,8 @@ def create_node(session_dir=None):
             if not self.history.executing or now < self._manual_until or self._active_since is None:
                 return
             valid = self.history.statuses.get('localization_valid')
-            if valid is not None and now-valid[0] > 0.5 and not self._heartbeat_latched:
+            if (valid is not None and not localization_is_fresh(True, valid[0], now)
+                    and not self._heartbeat_latched):
                 self._heartbeat_latched = True
                 self.trigger('localization_heartbeat_stale', 'Localization validity heartbeat stale during route',
                              '/localization/valid')

@@ -17,6 +17,7 @@ sys.path.insert(0, str(NAVIGATION))
 from ground import obstacle_mask
 from point_noise import cell_keys, retained_cells
 from navigation_grid import current_settings
+from localization_timing import localization_is_fresh
 from geometry import pose_matrix, transform_points
 
 NOETIC = NAVIGATION.parent / 'noetic'
@@ -30,8 +31,7 @@ OBSTACLE_TOPIC = '/navigation/measured_scan_obstacles'
 
 def scan_is_current(stamp_ns, now_ns, valid, valid_received, monotonic_now):
     """Do not present a frozen registration as a current obstacle observation."""
-    return (valid and valid_received is not None and
-            0. <= monotonic_now - valid_received <= .5 and
+    return (localization_is_fresh(valid, valid_received, monotonic_now) and
             stamp_ns > 0 and -.1e9 <= now_ns - stamp_ns <= 1.e9)
 
 

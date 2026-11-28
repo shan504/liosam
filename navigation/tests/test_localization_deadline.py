@@ -25,7 +25,7 @@ from localization_hold import OdometryBudget
 
 
 class ClockTime:
-    def __init__(self, ns):
+    def __init__(self, ns=0):
         self.nanoseconds = ns
 
     @classmethod
@@ -50,16 +50,17 @@ def production_process(namespace):
     tree = ast.parse((ROOT / 'mapper.py').read_text())
     mapper = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Mapper')
     mapper.bases = []
-    names = {'process', 'publish_map'}
+    names = {'process', 'publish_map', 'localization_readiness'}
     mapper.body = [n for n in mapper.body if isinstance(n, ast.FunctionDef) and n.name in names]
     assert {n.name for n in mapper.body} == names
     errors = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'ScanMatchUnavailable']
     require = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'require_match']
+    transforms = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'transform_matrix']
     registration = ast.parse((ROOT / 'registration.py').read_text())
     helpers = [n for n in registration.body if isinstance(n, ast.FunctionDef) and n.name in
                {'static_correction_is_consistent', 'blend_correction', 'odometry_is_stationary'}]
     assert len(errors) == len(require) == 1 and len(helpers) == 3
-    exec(compile(ast.Module(body=[*helpers, *errors, *require, mapper], type_ignores=[]),
+    exec(compile(ast.Module(body=[*helpers, *errors, *require, *transforms, mapper], type_ignores=[]),
                  str(ROOT / 'mapper.py'), 'exec'), namespace)
     return namespace['Mapper']
 
@@ -73,6 +74,7 @@ class LocalizationDeadline(unittest.TestCase):
         self.ros_ns = 100_000_000_000
         self.align_hook = self.serialize_hook = None
         self.accepted = True
+        self.result_reason = None
         self.align_calls = []
         # Asymmetric real coordinates; this harness never substitutes an
         # all-zero scan that could accidentally pass the finite/range filter.
@@ -99,7 +101,7 @@ class LocalizationDeadline(unittest.TestCase):
                 self.align_hook()
             return Obj(accepted=self.accepted, transform=self.solution.copy(), fitness=.9,
                        rmse=.03 if self.accepted else 1.,
-                       reason='accepted' if self.accepted else 'overlap/residual rejected')
+                       reason=self.result_reason or ('accepted' if self.accepted else 'overlap/residual rejected'))
 
         def serialized(header, points):
             if self.serialize_hook is not None:
@@ -108,12 +110,13 @@ class LocalizationDeadline(unittest.TestCase):
 
         self.serialize = Mock(side_effect=serialized)
         ns = dict(np=np, time=Obj(monotonic=lambda: self.monotonic), Time=ClockTime,
-                  Header=lambda **kw: Obj(**kw), String=lambda **kw: Obj(**kw),
+                  Header=lambda **kw: Obj(**kw), String=lambda **kw: Obj(**kw), TransformException=LookupError,
                   cloud=cloud, bounded_cloud=bounded,
                   cloud_xyz=lambda message: message.points.copy(),
                   filter_points=filter_points,
                   align=align, xyz_message=self.serialize, transform_points=transform_points,
                   first_map_pose=first_map_pose, pose_matrix=pose_matrix,
+                  OdometryBudget=OdometryBudget,
                   quaternion_from_matrix=quaternion_from_matrix, rotation_angle=rotation_angle)
         Mapper = production_process(ns)
         self.node = n = Mapper()
@@ -205,8 +208,8 @@ class LocalizationDeadline(unittest.TestCase):
                 n = self.reset()
                 # For old receipt, a newer empty packet keeps callbacks live
                 # but must not make the old contributing geometry fresh.
-                self.set_input(self.ros_ns - (1_200_000_000 if cause == 'stamp' else 200_000_000),
-                               499.8 if cause == 'stamp' else 498.8,
+                self.set_input(self.ros_ns - (2_200_000_000 if cause == 'stamp' else 200_000_000),
+                               499.8 if cause == 'stamp' else 497.8,
                                latest_empty=cause == 'receipt')
                 n.process()
                 self.assert_not_committed()
@@ -217,8 +220,8 @@ class LocalizationDeadline(unittest.TestCase):
             with self.subTest(phase=phase):
                 n = self.reset()
                 def delay():
-                    self.monotonic += 1.1
-                    self.ros_ns += 1_100_000_000
+                    self.monotonic += 2.1
+                    self.ros_ns += 2_100_000_000
                 if phase == 'solver':
                     self.align_hook = delay
                 else:
@@ -267,8 +270,8 @@ class LocalizationDeadline(unittest.TestCase):
         self.set_input(self.ros_ns - 100_000_000, 500.1)
 
         def delay():
-            self.monotonic += 1.1
-            self.ros_ns += 1_100_000_000
+            self.monotonic += 2.1
+            self.ros_ns += 2_100_000_000
 
         self.align_hook = delay
         n.process()

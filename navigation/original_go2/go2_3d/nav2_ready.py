@@ -8,6 +8,7 @@ from rclpy.qos import QoSProfile,DurabilityPolicy,qos_profile_sensor_data
 from std_msgs.msg import Bool,String
 from nav2_msgs.srv import ManageLifecycleNodes
 from tf2_ros import Buffer,TransformListener,TransformException
+from localization_timing import LOCALIZATION_HEARTBEAT_TIMEOUT, localization_is_fresh
 
 
 class Nav2Ready(Node):
@@ -40,7 +41,7 @@ class Nav2Ready(Node):
     def localization_wait(self,now):
         if self.received is None:
             reason,validity = 'localization_missing','/localization/valid: no messages'
-        elif now-self.received >= 0.5:
+        elif not 0 <= now-self.received < LOCALIZATION_HEARTBEAT_TIMEOUT:
             reason = 'localization_stale'
             validity = f'/localization/valid: stale; last={self.valid} receipt_age={now-self.received:.2f}s'
         else:
@@ -64,7 +65,7 @@ class Nav2Ready(Node):
         if self.attempted:
             return
         now = time.monotonic()
-        ready = self.valid and self.received is not None and now-self.received<0.5
+        ready = localization_is_fresh(self.valid, self.received, now)
         reason,text = self.localization_wait(now)
         if ready:
             try:

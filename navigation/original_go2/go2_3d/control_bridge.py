@@ -14,6 +14,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profi
 from rcl_interfaces.msg import ParameterDescriptor
 from go2_edu_dds_bridge import Go2EduBridge
 from motion_profile import LINEAR_SPEED, YAW_SPEED
+from localization_timing import LOCALIZATION_HEARTBEAT_TIMEOUT, localization_is_fresh
 import signal
 
 
@@ -59,8 +60,8 @@ class LocalizedBridge(Go2EduBridge):
         self.localization_state, self.localization_state_received = message.data, time.monotonic()
 
     def motion_inputs_fresh(self, now):
-        return (self.motion_allowed and self.localization_valid and
-                self.localization_received is not None and 0 <= now-self.localization_received < 0.5 and
+        return (self.motion_allowed and
+                localization_is_fresh(self.localization_valid, self.localization_received, now) and
                 all(t is not None and 0 <= now-t < 1.0 for t in (self.odom_received,self.cloud_received)))
 
     def on_cmd(self, message):
@@ -79,8 +80,7 @@ class LocalizedBridge(Go2EduBridge):
             reason = 'motion_not_allowed'
         elif not self.gate.enabled:
             reason = 'motion_disabled'
-        elif (not self.localization_valid or self.localization_received is None or
-              not 0 <= now-self.localization_received < 0.5):
+        elif not localization_is_fresh(self.localization_valid, self.localization_received, now):
             reason = 'localization_invalid_or_stale'
         elif not all(t is not None and 0 <= now-t < 1.0
                      for t in (self.odom_received,self.cloud_received)):
@@ -132,7 +132,7 @@ class LocalizedBridge(Go2EduBridge):
             reason = 'navigation motion not allowed'
         elif not self.gate.enabled:
             reason = 'motion disabled'
-        elif not 0 <= localization_age < 0.5:
+        elif not 0 <= localization_age < LOCALIZATION_HEARTBEAT_TIMEOUT:
             reason = 'localization_heartbeat_timeout'
         elif not self.localization_valid:
             reason = 'localization_reported_invalid'

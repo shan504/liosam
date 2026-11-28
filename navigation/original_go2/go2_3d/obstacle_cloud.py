@@ -18,6 +18,7 @@ from ground import heights, obstacle_mask
 from point_noise import keep_connected
 from ros_cloud import xyz_message
 from navigation_grid import current_settings
+from localization_timing import localization_is_fresh
 
 
 def obstacle_selection(points_map, plane, min_height, max_height):
@@ -74,7 +75,7 @@ class ObstacleCloud(Node):
             self.state = 'localization_invalid; obstacle output paused'
 
     def receive(self,msg):
-        if (not self.valid or self.valid_received is None or time.monotonic()-self.valid_received>0.5):
+        if not localization_is_fresh(self.valid, self.valid_received, time.monotonic()):
             return
         if msg.header.frame_id!='base_link':
             self.state = 'wrong_input_frame:'+msg.header.frame_id
@@ -89,7 +90,7 @@ class ObstacleCloud(Node):
         self.pending.append(msg)
 
     def process(self):
-        if (not self.valid or self.valid_received is None or time.monotonic()-self.valid_received>0.5):
+        if not localization_is_fresh(self.valid, self.valid_received, time.monotonic()):
             self.pending.clear()
             self.state = 'localization_invalid_or_stale; obstacle output paused'
             return

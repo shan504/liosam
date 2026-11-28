@@ -51,10 +51,13 @@ class ScanMatchUnavailable(ValueError):
     """Discard this scan without renewing the previous accepted match."""
 
 
-def require_match(result, prefix='', diagnostics=None):
+def require_match(result, prefix='', diagnostics=None, hold_rejected_candidate=False):
     if not result.accepted:
-        error = (ScanMatchUnavailable if result.reason in
-                 ('too few points', 'overlap/residual rejected') else ValueError)
+        unavailable = result.reason in ('too few points', 'overlap/residual rejected')
+        if (hold_rejected_candidate and result.reason == 'innovation rejected' and
+                np.isfinite(result.transform).all()):
+            unavailable = True
+        error = ScanMatchUnavailable if unavailable else ValueError
         detail = '' if not diagnostics else '; '+diagnostics
         raise error(f'{prefix}{result.reason}: fitness={result.fitness:.3f} rmse={result.rmse:.3f}'+detail)
 
@@ -79,10 +82,11 @@ class Mapper(Node):
                         localization_initial_max_rotation_degrees=90.0,
                         localization_coarse_iterations=20, localization_fine_iterations=20,
                         localization_max_translation=1.0, localization_max_rotation_degrees=45.0,
-                        localization_min_fitness=0.20, localization_max_rmse=0.20,
+                        localization_min_fitness=0.20, localization_max_rmse=0.25,
                         stationary_translation_limit=0.35, stationary_rotation_limit_degrees=12.0,
-                        localization_hold_timeout=3.0, localization_hold_distance=1.0,
-                        localization_hold_rotation_degrees=60.0, localization_odom_timeout=0.3,
+                        localization_result_timeout=2.0,
+                        localization_hold_timeout=5.0, localization_hold_distance=1.5,
+                        localization_hold_rotation_degrees=180.0, localization_odom_timeout=0.3,
                         correction_alpha=0.25,auto_initialize=True,initial_from_map_start=True,
                         initial_x=0.0,initial_y=0.0,initial_z=0.0,initial_yaw_degrees=0.0)
         defaults.update(loop_closure_enabled=True, mapping_backend='lidar', map_frame='map')
@@ -119,6 +123,7 @@ class Mapper(Node):
         for name in ('stationary_translation_limit', 'stationary_rotation_limit_degrees',
                      'localization_correspondence', 'localization_max_translation',
                      'localization_max_rotation_degrees', 'validity_timeout',
+                     'localization_result_timeout', 'localization_max_rmse',
                      'localization_hold_timeout', 'localization_hold_distance',
                      'localization_hold_rotation_degrees', 'localization_odom_timeout',
                      'localization_voxel_size', 'localization_coarse_voxel',
@@ -211,8 +216,14 @@ class Mapper(Node):
                 f'{self.p["localization_initial_max_translation"]:.1f}m/'
                 f'{self.p["localization_initial_max_rotation_degrees"]:.0f}deg; '
                 f'source/target limits {self.p["localization_max_source_points"]}/'
-                f'{self.p["localization_max_target_points"]}; freshness '
-                f'{self.p["validity_timeout"]:.1f}s; final quality checks retained')
+                f'{self.p["localization_max_target_points"]}; result deadline '
+                f'{self.p["localization_result_timeout"]:.1f}s, live cloud freshness '
+                f'{self.p["validity_timeout"]:.1f}s, native odometry freshness '
+                f'{self.p["localization_odom_timeout"]:.1f}s; planar odometry hold '
+                f'{self.p["localization_hold_timeout"]:.1f}s/'
+                f'{self.p["localization_hold_distance"]:.1f}m/'
+                f'{self.p["localization_hold_rotation_degrees"]:.0f}deg; '
+                f'fine RMSE <= {self.p["localization_max_rmse"]:.2f}m')
             self.get_logger().info('Loaded 3D map; automatic initialization from saved mapping start'
                                    if self.p['auto_initialize'] and self.p['initial_from_map_start'] else
                                    'Loaded 3D map; waiting for configured or manual /initialpose')
@@ -583,6 +594,8 @@ class Mapper(Node):
 
     def process(self):
         started = time.monotonic()
+        result_timeout = (self.p['localization_result_timeout'] if self.p['mode'] == 'localization'
+                          else self.p['validity_timeout'])
         target_count = registration_count = 0
         with self.lock:
             if self.external_backend and (not self.backend_ready or not all(
@@ -691,12 +704,12 @@ class Mapper(Node):
                                    max_rotation=np.deg2rad(self.p['localization_initial_max_rotation_degrees']),
                                    iterations=self.p['localization_coarse_iterations'],
                                    relative_fitness=1e-4, relative_rmse=1e-4)
-                    require_match(coarse, 'Initial coarse GICP ')
+                    require_match(coarse, 'Initial coarse GICP ', hold_rejected_candidate=True)
                     matched = coarse.transform
                 result = align(source, targets.fine, matched,
                                correspondence=self.p['localization_correspondence'],
                                min_fitness=self.p['localization_min_fitness'],
-                               max_rmse=min(self.p['max_rmse'],self.p['localization_max_rmse']),
+                               max_rmse=self.p['localization_max_rmse'],
                                max_translation=(self.p['localization_max_translation'] if seeded else
                                                 self.p['localization_initial_max_translation']),
                                max_rotation=np.deg2rad(self.p['localization_max_rotation_degrees'] if seeded else
@@ -705,9 +718,10 @@ class Mapper(Node):
                                relative_fitness=1e-4, relative_rmse=1e-4)
                 require_match(result, 'Fine GICP ', diagnostics=(
                     f'limits fitness>={self.p["localization_min_fitness"]:.3f} '
-                    f'rmse<={min(self.p["max_rmse"], self.p["localization_max_rmse"]):.3f}m; '
+                    f'rmse<={self.p["localization_max_rmse"]:.3f}m; '
                     f'source_points={registration_count} target_points={target_count}; '
-                    f'map_geometry={getattr(self, "map_metadata", {}).get("pc_geometry", "legacy/unspecified")}'))
+                    f'map_geometry={getattr(self, "map_metadata", {}).get("pc_geometry", "legacy/unspecified")}'),
+                    hold_rejected_candidate=True)
                 matched,fitness,rmse = result.transform,result.fitness,result.rmse
             new_correction = matched@np.linalg.inv(odom_base)
             # A standing robot's accepted scan-to-map noise must not move
@@ -727,7 +741,8 @@ class Mapper(Node):
             if not static_correction_is_consistent(reference,new_correction,previous_odom,odom_base,
                                                    translation_limit,rotation_limit):
                 jump = np.linalg.inv(reference@odom_base)@matched
-                raise ValueError(f'Rejected GICP correction jump while odometry stationary: {np.linalg.norm(jump[:3,3]):.3f}m / {np.degrees(rotation_angle(jump)):.2f}deg (limit {translation_limit:.2f}m / {np.degrees(rotation_limit):.1f}deg)')
+                failure = ScanMatchUnavailable if self.p['mode'] == 'localization' else ValueError
+                raise failure(f'Rejected GICP correction jump while odometry stationary: {np.linalg.norm(jump[:3,3]):.3f}m / {np.degrees(rotation_angle(jump)):.2f}deg (limit {translation_limit:.2f}m / {np.degrees(rotation_limit):.1f}deg)')
             if hold_mapping_anchor:
                 # Validate the pose actually used for accumulation as well
                 # as the raw GICP solution; holding a frame cannot turn a
@@ -738,12 +753,12 @@ class Mapper(Node):
                     raise ScanMatchUnavailable('Stationary mapping anchor overlap/residual rejected')
                 fitness, rmse = held.fitness, held.inlier_rmse
             age = (self.get_clock().now()-Time.from_msg(source_stamp)).nanoseconds/1e9
-            if (not 0 <= time.monotonic()-source_received <= self.p['validity_timeout'] or
-                    not -0.1 <= age <= self.p['validity_timeout']):
+            if (not 0 <= time.monotonic()-source_received <= result_timeout or
+                    not -0.1 <= age <= result_timeout):
                 raise ScanMatchUnavailable(
                     f'Registration result too old; processing_time={time.monotonic()-started:.3f}s '
                     f'source_age={time.monotonic()-source_received:.3f}s stamp_age={age:.3f}s '
-                    f'limit={self.p["validity_timeout"]:.3f}s '
+                    f'limit={result_timeout:.3f}s '
                     f'source_points={registration_count} target_points={target_count}')
             # Prepare every fallible map/grid/payload calculation before
             # committing pose or acceptance. A failed keyframe cannot move
@@ -776,17 +791,30 @@ class Mapper(Node):
                     free_additions = self.grid.prepare_observation(new,matched[:3,3])
                     if self.loop_worker is not None:
                         observation = MappingObservation(input_points, matched)
+            # Validate the new native-odom anchor before any pose/map mutation.
+            # A finite SE(3) pose may still have no usable planar heading.
+            new_odom_budget = OdometryBudget()
+            new_odom_budget.reset(source_odom, Time.from_msg(source_stamp).nanoseconds)
+            if not new_odom_budget.observe(odom_base, Time.from_msg(message.header.stamp).nanoseconds):
+                raise ValueError('Contributing scan odometry clock regressed before pose commit')
             age = (self.get_clock().now()-Time.from_msg(source_stamp)).nanoseconds/1e9
-            if (not 0 <= time.monotonic()-source_received <= self.p['validity_timeout'] or
-                    not -0.1 <= age <= self.p['validity_timeout']):
+            if (not 0 <= time.monotonic()-source_received <= result_timeout or
+                    not -0.1 <= age <= result_timeout):
                 raise ScanMatchUnavailable(
                     f'Registration result too old after output preparation; '
                     f'processing_time={time.monotonic()-started:.3f}s '
                     f'source_age={time.monotonic()-source_received:.3f}s stamp_age={age:.3f}s '
-                    f'limit={self.p["validity_timeout"]:.3f}s; no pose or map changes committed')
+                    f'limit={result_timeout:.3f}s; no pose or map changes committed')
             with self.lock:
                 if generation != self.generation:
                     return
+                if self.p['mode'] == 'localization':
+                    latest = self.latest
+                    if (latest is None or
+                            not 0 <= time.monotonic()-latest[2] <= self.p['validity_timeout'] or
+                            not -0.1 <= (self.get_clock().now()-Time.from_msg(
+                                latest[0].header.stamp)).nanoseconds/1e9 <= self.p['validity_timeout']):
+                        raise ScanMatchUnavailable('Live cloud stream too old after GICP; result not committed')
                 if update is not None:
                     self.mapping_store.commit(update)
                     self.grid.free.update(free_additions)
@@ -807,8 +835,7 @@ class Mapper(Node):
                                                       Time.from_msg(source_stamp).nanoseconds, fitness, rmse)
                 # Empty latest packets can shift the window reference, but
                 # cannot move the hold's time OR motion anchor forward.
-                self.odom_budget.reset(source_odom, Time.from_msg(source_stamp).nanoseconds)
-                self.odom_budget.observe(odom_base, Time.from_msg(message.header.stamp).nanoseconds)
+                self.odom_budget = new_odom_budget
                 self.hold_exhausted = ''
                 self.registered_pub.publish(registered_message)
                 if self.external_backend:
@@ -868,8 +895,8 @@ class Mapper(Node):
             return False, 'registration_invalid', hint+'; last_match_failure='+self.last_failure
         now = time.monotonic()
         accepted_age = now-self.last_accepted
-        detail = (f'accepted_age={accepted_age:.2f}s travel={self.odom_budget.distance:.3f}m'
-                  f' turn={np.degrees(self.odom_budget.angle):.1f}deg'
+        detail = (f'accepted_age={accepted_age:.2f}s planar_travel={self.odom_budget.distance:.3f}m'
+                  f' heading_turn={np.degrees(self.odom_budget.angle):.1f}deg'
                   f'; last_match_failure={self.last_failure or "none"}')
         if not 0 <= accepted_age <= self.p['localization_hold_timeout']:
             return False, 'registration_timeout', detail
@@ -890,12 +917,15 @@ class Mapper(Node):
             matrix = transform_matrix(odom.transform)
         except (TransformException, ValueError) as error:
             return False, 'odometry_unavailable', detail+f' {error}'
-        if not self.odom_budget.observe(matrix, stamp.nanoseconds):
-            return False, 'odometry_clock_regressed', detail
+        try:
+            if not self.odom_budget.observe(matrix, stamp.nanoseconds):
+                return False, 'odometry_clock_regressed', detail
+        except ValueError as error:
+            return False, 'odometry_invalid', detail+f' {error}'
         self.hold_exhausted = self.odom_budget.exceeded(
             self.p['localization_hold_distance'], np.deg2rad(self.p['localization_hold_rotation_degrees']))
-        detail = (f'accepted_age={accepted_age:.2f}s odom_age={age:.2f}s travel={self.odom_budget.distance:.3f}m'
-                  f' turn={np.degrees(self.odom_budget.angle):.1f}deg; last_match_failure={self.last_failure or "none"}')
+        detail = (f'accepted_age={accepted_age:.2f}s odom_age={age:.2f}s planar_travel={self.odom_budget.distance:.3f}m'
+                  f' heading_turn={np.degrees(self.odom_budget.angle):.1f}deg; last_match_failure={self.last_failure or "none"}')
         if self.hold_exhausted:
             return False, self.hold_exhausted, detail
         state = 'odometry_hold' if self.last_failure or accepted_age > self.p['validity_timeout'] else 'tracking'

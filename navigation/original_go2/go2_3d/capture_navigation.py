@@ -267,6 +267,7 @@ class ContextCapture:
     SOURCE_FILES = (
         'go2_3d/gicp.yaml', 'go2_3d/gicp_dense.yaml', 'go2_3d/navigation_grid.yaml',
         'go2_3d/navigation_filter.yaml', 'go2_3d/navigate.xml', 'go2_3d/motion_profile.py',
+        'go2_3d/localization_timing.py', 'go2_3d/localization_hold.py',
         'Dockerfile', 'requirements-validation.txt')
     GENERATED_FILES = (
         'runtime/config/nav2_3d.yaml', 'runtime/config/go2_edu.urdf',

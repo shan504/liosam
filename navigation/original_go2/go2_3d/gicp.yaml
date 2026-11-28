@@ -21,11 +21,14 @@ go2_gicp:
     submap_radius: 25.0
     registration_period: 0.5
     validity_timeout: 1.0
-    # Bounded dead reckoning from the last accepted scan. Never renewed by
-    # bad/empty scans; require cloud <=1s and real odometry <=0.3s throughout.
-    localization_hold_timeout: 3.0
-    localization_hold_distance: 1.0
-    localization_hold_rotation_degrees: 60.0
+    # Computation deadline is separate from cloud/odometry freshness. Slow
+    # timestamped results keep their original source age, never completion age.
+    localization_result_timeout: 2.0
+    # Bounded planar dead reckoning from the last accepted scan. Never renewed
+    # by rejected/empty scans; cloud <=1s and native odometry <=0.3s throughout.
+    localization_hold_timeout: 5.0
+    localization_hold_distance: 1.5
+    localization_hold_rotation_degrees: 180.0
     localization_odom_timeout: 0.3
     # Independent recovery after previously accepted localization is lost.
     # Does not weaken normal GICP or extend the dead-reckoning limits above.
@@ -59,7 +62,7 @@ go2_gicp:
     localization_max_translation: 1.0
     localization_max_rotation_degrees: 45.0
     localization_min_fitness: 0.20
-    localization_max_rmse: 0.20
+    localization_max_rmse: 0.25
     correction_alpha: 0.25
     # Patrol localization tolerates measured scan variation. Mapping
     # keeps its separate 5cm / 2deg jump check; source freshness is still 1s.

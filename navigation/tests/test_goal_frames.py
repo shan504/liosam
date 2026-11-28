@@ -16,6 +16,7 @@ import numpy as np
 GO2 = Path(__file__).resolve().parents[1] / 'original_go2/go2_3d'
 sys.path.insert(0, str(GO2))
 from geometry import pose_matrix, grid_cell, quaternion_from_matrix
+from localization_timing import LOCALIZATION_HEARTBEAT_TIMEOUT, localization_is_fresh
 from goal_frames import (GOAL_TF_WAIT_SECONDS, goal_frame, odom_goal_to_map,
                          validate_odom_goal_time)
 
@@ -105,6 +106,8 @@ class GoalQueue(unittest.TestCase):
         self.clock=NS(mono=10.,ns=100_000_000_000)
         namespace=dict(Node=object,copy=copy,deque=deque,math=math,
             time=NS(monotonic=lambda:self.clock.mono),Time=FakeTime,
+            LOCALIZATION_HEARTBEAT_TIMEOUT=LOCALIZATION_HEARTBEAT_TIMEOUT,
+            localization_is_fresh=localization_is_fresh,
             TransformException=FakeTFError,pose_matrix=pose_matrix,grid_cell=grid_cell,
             GOAL_TF_WAIT_SECONDS=GOAL_TF_WAIT_SECONDS,goal_frame=goal_frame,
             odom_goal_to_map=odom_goal_to_map,validate_odom_goal_time=validate_odom_goal_time,

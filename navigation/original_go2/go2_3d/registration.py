@@ -44,9 +44,10 @@ def align(source, target, guess, correspondence=0.7, min_fitness=0.55,
                      rotation_angle(delta) <= max_rotation)
     quality_ok = result.fitness >= min_fitness and result.inlier_rmse <= max_rmse
     accepted = innovation_ok and quality_ok
-    # Distinguish a missing/poor scan from a dangerous pose innovation. Only
-    # the former may hold the previous match within its original time and
-    # odometry budgets. No rejected result updates that reference/deadline.
+    # Report candidate rejection separately from acceptance. Localization can
+    # discard a finite outlier and retain its old trusted estimate within its
+    # original time/odometry budget. It never applies the rejected transform
+    # or uses that candidate to renew the reference/deadline.
     reason = ('nonfinite transform' if not finite else 'innovation rejected' if not innovation_ok
               else 'overlap/residual rejected' if not quality_ok else 'accepted')
     return Match(accepted, result.transformation, result.fitness, result.inlier_rmse,

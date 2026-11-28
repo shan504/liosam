@@ -23,6 +23,7 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener, TransformException
 from geometry import pose_matrix, grid_cell, quaternion_from_matrix, planar_pose
 from motion_profile import ARRIVAL_RADIUS
+from localization_timing import LOCALIZATION_HEARTBEAT_TIMEOUT, localization_is_fresh
 from route_store import map_identity, validate_route
 from goal_frames import (GOAL_TF_WAIT_SECONDS, goal_frame,
                          odom_goal_to_map, validate_odom_goal_time)
@@ -196,7 +197,7 @@ class Operator(Node):
         self.waypoint_markers.publish(MarkerArray(markers=markers))
 
     def localized(self):
-        return self.valid and self.valid_received is not None and time.monotonic()-self.valid_received < 0.5
+        return localization_is_fresh(self.valid, self.valid_received, time.monotonic())
 
     def on_validity(self,message):
         self.valid, self.valid_received = message.data,time.monotonic()
@@ -335,7 +336,7 @@ class Operator(Node):
     def localization_loss_detail(self):
         now = time.monotonic()
         age = now-self.valid_received if self.valid_received is not None else float('inf')
-        reason = 'localization_heartbeat_timeout' if not 0 <= age < 0.5 else 'localization_reported_invalid'
+        reason = 'localization_heartbeat_timeout' if not 0 <= age < LOCALIZATION_HEARTBEAT_TIMEOUT else 'localization_reported_invalid'
         state_age = now-self.localization_state_received if self.localization_state_received is not None else float('inf')
         return (f'reason={reason} validity_age={age:.2f}s; latest_state_age={state_age:.2f}s '
                 f'latest_mapper_{self.localization_state}')
