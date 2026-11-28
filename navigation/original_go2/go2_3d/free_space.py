@@ -2,22 +2,43 @@
 from pathlib import Path
 import numpy as np
 import yaml
+from grid_io import read_pgm
 
 
-def visible_free(source):
+def visible_free(source, *, mapped=False):
     source = Path(source)
     nav = yaml.safe_load((source/'nav.yaml').read_text())
-    raw = (source/nav['image']).read_bytes().split(b'\n',3)
-    width,height = map(int,raw[1].split())
-    if raw[0]!=b'P5' or raw[2]!=b'255' or len(raw[3])!=width*height:
-        raise ValueError('Unsupported source PGM; refusing to guess free areas')
+    image = read_pgm(source / nav['image'])
     # PGM rows are top-down; navigation lattice rows are bottom-up. Use the
     # visible grid, not archive entries that were overridden by obstacles.
-    known = np.frombuffer(raw[3],np.uint8).reshape(height,width)[::-1]>=250
-    return nav,known
+    if mapped:
+        return nav, image[::-1]
+    try:
+        known = image[::-1] >= 250
+    finally:
+        image._mmap.close()
+    return nav, known
 
 
-def resample_free(source, ground, transform, resolution, max_cells=4_000_000,
+def _free_bounds(known):
+    """Find visible-free XY extents with bounded pixel/index working buffers."""
+    height, width = known.shape
+    # Restore contiguous on-disk row order before flattening: no image copy.
+    flat = known[::-1].reshape(-1)
+    lower = upper = None
+    for start in range(0, flat.size, 65536):
+        indices = np.flatnonzero(flat[start:start + 65536] >= 250) + start
+        if not len(indices):
+            continue
+        x, y = indices % width, height - 1 - indices // width
+        lo = np.array([x.min(), y.min()], dtype=np.int64)
+        hi = np.array([x.max(), y.max()], dtype=np.int64)
+        lower = lo if lower is None else np.minimum(lower, lo)
+        upper = hi if upper is None else np.maximum(upper, hi)
+    return lower, upper
+
+
+def resample_free(source, ground, transform, resolution, max_cells=None,
                   allow_coarser=False):
     """Keep a destination cell only if its old-grid bounding box is all free.
 
@@ -25,10 +46,19 @@ def resample_free(source, ground, transform, resolution, max_cells=4_000_000,
     destination cell onto the old floor lattice; conservative bounding boxes
     also prevent rotation/coarsening from clearing unknown/occupied areas.
     Coarsening is opt-in for runtime grids; offline leveling keeps its contract.
+    The legacy max_cells argument is accepted without imposing a size ceiling.
     """
-    nav,known = visible_free(source)
+    nav, known = visible_free(source, mapped=True)
+    try:
+        return _resample_image(nav, known, ground, transform, resolution, allow_coarser)
+    finally:
+        known._mmap.close()
+
+
+def _resample_image(nav, known, ground, transform, resolution, allow_coarser):
     old_resolution = float(nav['resolution'])
-    if (not np.isfinite(resolution) or resolution <= 0 or
+    if (not np.isfinite(old_resolution) or old_resolution <= 0 or
+            not np.isfinite(resolution) or resolution <= 0 or
             (not allow_coarser and resolution > old_resolution+1e-8)):
         raise ValueError('Free-area transfer requires an equal or finer resolution')
     plane = np.asarray(ground['plane'],dtype=float)
@@ -43,18 +73,16 @@ def resample_free(source, ground, transform, resolution, max_cells=4_000_000,
     offset = (matrix[:2,3]-matrix[:2,2]*plane[3]/plane[2]+
               floor_xy@np.asarray(nav['origin'][:2]))
     inverse = np.linalg.inv(linear)
-    rows,cols = np.nonzero(known)
-    if not len(rows):
+    lower, upper = _free_bounds(known)
+    if lower is None:
         return set()
-    lower = np.array([cols.min(),rows.min()])*old_resolution
-    upper = (np.array([cols.max(),rows.max()])+1)*old_resolution
+    lower = lower * old_resolution
+    upper = (upper + 1) * old_resolution
     corners = np.array([[lower[0],lower[1]],[upper[0],lower[1]],
                         [lower[0],upper[1]],[upper[0],upper[1]]])@linear.T+offset
     lo = np.floor(corners.min(0)/resolution).astype(int)
     hi = np.floor(corners.max(0)/resolution).astype(int)
-    width,height = hi-lo+1
-    if width*height>max_cells:
-        raise ValueError('Transferred grid bounds exceed memory limit')
+    width, height = (int(hi[i]) - int(lo[i]) + 1 for i in (0, 1))
     # Tiny inward offsets treat shared cell boundaries consistently despite
     # float32 PCD/ROS resolutions. They do not bridge gaps between cells.
     steps = np.array([[0.,0.],[1.,0.],[0.,1.],[1.,1.]])
@@ -74,7 +102,7 @@ def resample_free(source, ground, transform, resolution, max_cells=4_000_000,
                 x,y = a[:,0]+dx,a[:,1]+dy
                 inside = (x>=0)&(x<known.shape[1])&(y>=0)&(y<known.shape[0])
                 free = np.zeros(len(cells),dtype=bool)
-                free[inside] = known[y[inside],x[inside]]
+                free[inside] = known[y[inside],x[inside]] >= 250
                 good &= ~needed|free
         result.update(map(tuple,cells[good]))
     return result
@@ -111,3 +139,4 @@ def restore_ancestor_free(root, metadata, grid, target_from_map=None):
         current = previous
     grid.free.update(restored)
     return len(restored)
+

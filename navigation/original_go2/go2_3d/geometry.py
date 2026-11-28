@@ -1,8 +1,10 @@
 """ROS-independent SE(3), cloud filtering and observed-space grid export."""
 import math
+import sys
 from pathlib import Path
 import numpy as np
 import yaml
+from grid_io import cell_chunks, coordinate_dtype, create_pgm, write_cells_npz
 
 
 def pose_matrix(position, quaternion):
@@ -109,15 +111,16 @@ def line_cells(start, end):
 
 class ObservedGrid:
     """Unknown stays unknown; occupied voxels override any observed free rays."""
-    def __init__(self, resolution=0.10, max_cells=4_000_000):
-        if resolution <= 0:
-            raise ValueError("resolution must be positive")
+    def __init__(self, resolution=0.10, max_cells=None):
+        if not math.isfinite(resolution) or resolution <= 0:
+            raise ValueError("resolution must be finite and positive")
         self.resolution = resolution
-        self.max_cells = max_cells
+        # Retain the legacy argument/property for callers, without a map-size ceiling.
+        self.max_cells = None
         self.free = set()
 
     def prepare_observation(self, points, origin):
-        """Return new free cells after validating the observation's budget.
+        """Return new observed free cells without changing the live grid.
 
         Preparation never changes the live grid. Callers can finish other
         fallible frame calculations before committing these cells with
@@ -140,10 +143,6 @@ class ObservedGrid:
             end = tuple(np.floor(points[index,:2]/self.resolution).astype(int))
             cells = list(line_cells(start, end))
             additions.update(cell for cell in cells[:-1] if cell not in self.free)
-            if len(self.free) + len(additions) > self.max_cells:
-                raise RuntimeError("Observed-space limit exceeded; save a smaller map")
-        if len(self.free) + len(additions) > self.max_cells:
-            raise RuntimeError("Observed-space limit exceeded; save a smaller map")
         return additions
 
     def observe(self, points, origin):
@@ -163,25 +162,42 @@ class ObservedGrid:
             cells,counts = np.unique(np.floor(floor[:,:2]/self.resolution).astype(int),
                                      axis=0,return_counts=True)
             self.free.update(map(tuple,cells[counts>=2]))
-        occupied = set(map(tuple, np.floor(obstacle[:,:2]/self.resolution).astype(int)))
-        observed = self.free | occupied
+        occupied = set()
+        for offset in range(0, len(obstacle), 65536):
+            occupied.update(map(tuple, np.floor(
+                obstacle[offset:offset + 65536, :2] / self.resolution).astype(np.int64)))
         if not occupied or not self.free:
             raise ValueError("No occupied or observed-free cells; check height slice and sensor data")
-        coordinates = np.asarray(list(observed))
-        lower, upper = coordinates.min(axis=0)-2, coordinates.max(axis=0)+2
-        width, height = upper-lower+1
-        if width*height > self.max_cells:
-            raise RuntimeError("Grid bounds exceed memory limit")
-        image = np.full((height, width), 205, dtype=np.uint8)
-        for cells, value in ((self.free, 254), (occupied, 0)):
-            cells = np.asarray(list(cells))-lower
-            image[height-1-cells[:,1], cells[:,0]] = value
+        # Find sparse extents without duplicating both sets into their union and
+        # a full coordinate array. Preserve the original two-cell unknown border.
+        lower = upper = None
+        for cells in (self.free, occupied):
+            for batch in cell_chunks(cells):
+                lo, hi = batch.min(axis=0), batch.max(axis=0)
+                lower = lo if lower is None else np.minimum(lower, lo)
+                upper = hi if upper is None else np.maximum(upper, hi)
+        lower = tuple(int(value) - 2 for value in lower)
+        upper = tuple(int(value) + 2 for value in upper)
+        width, height = (upper[i] - lower[i] + 1 for i in (0, 1))
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory/'nav.pgm').write_bytes(f'P5\n{width} {height}\n255\n'.encode()+image.tobytes())
+        print(f'导航栅格：{width} × {height} = {width * height} 格，'
+              f'分辨率 {self.resolution:g} m；按完整范围分块写入。',
+              file=sys.stderr, flush=True)
+        image = create_pgm(directory / 'nav.pgm', width, height)
+        try:
+            for cells, value in ((self.free, 254), (occupied, 0)):
+                for batch in cell_chunks(cells):
+                    x = batch[:, 0] - lower[0]
+                    y = height - 1 - (batch[:, 1] - lower[1])
+                    image[y, x] = value
+            image.flush()
+        finally:
+            image._mmap.close()
         metadata = dict(image='nav.pgm', mode='trinary', resolution=self.resolution,
                         origin=[float(lower[0]*self.resolution), float(lower[1]*self.resolution), 0.0],
                         negate=0, occupied_thresh=0.65, free_thresh=0.196)
         (directory/'nav.yaml').write_text(yaml.safe_dump(metadata))
-        np.savez_compressed(directory/'observed_free.npz',cells=np.asarray(list(self.free),dtype=np.int32))
+        write_cells_npz(directory / 'observed_free.npz', self.free,
+                        coordinate_dtype(lower, upper))
         return metadata

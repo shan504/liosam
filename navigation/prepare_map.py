@@ -20,7 +20,6 @@ MAX_DISPLAY_POINTS = 160_000
 FLOOR_TOLERANCE = 0.045
 OBSTACLE_MIN_HEIGHT = 0.085
 OBSTACLE_MAX_HEIGHT = 0.85
-MAX_CELLS = 16_000_000
 MAX_VOXELS = 1_500_000
 
 
@@ -239,8 +238,6 @@ def build(version, dest, layout):
     lower = np.floor(np.minimum(lower, lidar_xy.min(axis=0)) / RESOLUTION).astype(np.int64) - 2
     upper = np.floor(np.maximum(upper, lidar_xy.max(axis=0)) / RESOLUTION).astype(np.int64) + 2
     w, h = map(int, upper-lower+1)
-    if w*h > MAX_CELLS:
-        raise ValueError('地图边界超出 1600 万栅格，请核对建图是否漂移')
     free, obstacles = np.zeros((h, w), 'u1'), np.zeros((h, w), 'u1')
     processed = n_scans = exact = 0
     with (version / layout[1]).open(newline='') as f:
@@ -333,3 +330,4 @@ if __name__ == '__main__':
         print(prepare(args.version, args.cache).resolve())
     except (OSError, KeyError, ValueError, TypeError) as exc:
         sys.exit('导航地图准备失败：' + str(exc))
+

@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 import sys
 import tempfile
+import time
 
 import numpy as np
 import yaml
@@ -27,12 +28,29 @@ from mapping_store import _keys
 from navigation_grid import current_settings
 
 
+class Progress:
+    """Keep preparation visible on stderr; stdout is the cache-path protocol."""
+    def __init__(self, stage, total):
+        self.stage, self.total = stage, total
+        self.started = self.last = time.monotonic()
+        self.report(0, force=True)
+
+    def report(self, done, force=False):
+        now = time.monotonic()
+        if force or done == self.total or now - self.last >= 5.:
+            print(f'{self.stage}: {done:,}/{self.total:,} '
+                  f'({100.*done/max(1,self.total):.1f}%)，耗时 {now-self.started:.1f}s',
+                  file=sys.stderr, flush=True)
+            self.last = now
+
+
 def cache_key(version, inputs):
     digest = hashlib.sha256()
     # The container always sees /map_source. Include actual per-version input
     # identities and the original grid policy used to generate the cached map.
     for path in [Path(__file__), HERE / 'prepare_map.py',
-                 *[GO2 / p for p in ('geometry.py', 'ground.py', 'denoise.py', 'navigation_grid.py',
+                 *[GO2 / p for p in ('geometry.py', 'grid_io.py', 'ground.py', 'denoise.py',
+                                     'free_space.py', 'navigation_grid.py',
                                      'navigation_grid.yaml', 'navigation_filter.yaml', 'map_start.py',
                                      'mapping_store.py', 'gicp_dense.yaml')]]:
         digest.update(path.read_bytes())
@@ -73,8 +91,9 @@ def export_grid(chunks, grid, directory, policy, model):
         cells, indices = np.unique(np.floor(obstacles[:, :2]/grid.resolution).astype(np.int64),
                                    axis=0, return_index=True)
         occupied.update(zip(map(tuple, cells), map(tuple, obstacles[indices])))
-        if max(len(grid.free), len(occupied)) > grid.max_cells:
-            raise ValueError('地图超过原 Go2 Nav2 的栅格容量')
+    print(f'正在导出完整导航栅格：实测通行 {len(grid.free):,} 格，'
+          f'障碍 {len(occupied):,} 格，分辨率 {grid.resolution:g} m',
+          file=sys.stderr, flush=True)
     samples = np.asarray(list(occupied.values()), dtype=np.float32).reshape(-1, 3)
     grid.export(samples, directory, floor_z=0., min_height=low, max_height=high, ground_model=model)
 
@@ -109,6 +128,8 @@ def write_voxel_map(db, dest, voxel):
               f'POINTS {retained}\nDATA binary\n')
     cursor = db.execute('SELECT x,y,z,sx/hits,sy/hits,sz/hits,si/NULLIF(ni,0) '
                         'FROM voxels ORDER BY x,y,z')
+    progress = Progress('写入定位地图体素', retained)
+    written = 0
     with dest.open('xb') as out:
         out.write(header.encode('ascii'))
         while True:
@@ -126,15 +147,19 @@ def write_voxel_map(db, dest, voxel):
             xyz[rounded < keys] = np.nextafter(xyz[rounded < keys], np.float32(np.inf))
             xyz[rounded > keys] = np.nextafter(xyz[rounded > keys], np.float32(-np.inf))
             out.write(memoryview(centroids).cast('B'))
+            written += len(block)
+            progress.report(written)
     return retained
 
 
 def aligned_chunks(raw, transform, db, voxel):
+    progress = Progress('转换全部原始回波并聚合定位体素', len(raw))
     for offset in range(0, len(raw), 131072):
         points = np.array(raw[offset:offset+131072], copy=True)
         points[:, :3] = apply(points, transform)
         accumulate_voxels(db, points, voxel)
         yield points
+        progress.report(min(offset+len(points), len(raw)))
 
 
 def trace_archive(version, dest, manifest, files):
@@ -143,6 +168,9 @@ def trace_archive(version, dest, manifest, files):
     raw = point_array(version / files[0])
     if len(raw) != manifest['dense']['points'] or len(raw) < 100:
         raise ValueError('地图点数不足或与 manifest 不符')
+    print(f'存档：{len(raw):,} 个原始回波，{manifest["dense"]["scans"]:,} 帧，'
+          f'XYZI 数据 {raw.nbytes/(1024**3):.2f} GiB；完整读取，不裁剪地图。',
+          file=sys.stderr, flush=True)
     with (version / files[2]).open(newline='') as stream:
         keyframes = {}
         for row in csv.DictReader(stream):
@@ -162,6 +190,7 @@ def trace_archive(version, dest, manifest, files):
     grid = ObservedGrid(policy['grid_resolution'])
     n = len(raw)
     n_scans = first = exact = 0
+    progress = Progress('恢复实测通行区域（扫描帧）', manifest['dense']['scans'])
     with (version / files[1]).open(newline='') as stream:
         for row in csv.DictReader(stream):
             stamp, anchor = int(row['stamp_ns']), int(row['anchor_stamp_ns'])
@@ -178,6 +207,7 @@ def trace_archive(version, dest, manifest, files):
                 exact += 1
             first += count
             n_scans += 1
+            progress.report(n_scans)
     if first != n or n_scans != manifest['dense']['scans']:
         raise ValueError('逐帧索引数量与地图不符')
 
@@ -198,6 +228,7 @@ def trace_archive(version, dest, manifest, files):
                        'sz REAL,si REAL,hits INTEGER,ni INTEGER, PRIMARY KEY(x,y,z)) WITHOUT ROWID')
             export_grid(aligned_chunks(raw, ground, db, voxel), grid, dest, policy, model)
             retained = write_voxel_map(db, dest/'map.pcd', voxel)
+    print('正在按原规则去除导航栅格孤立噪点……', file=sys.stderr, flush=True)
     report = clean_directory(dest)
     name = map_name(manifest.get('name', Path(files[0]).stem))
     metadata = dict(frame_id='map', map_type='lio_sam', point_count=retained, source_point_count=n,
@@ -231,6 +262,7 @@ def prepare(version, cache):
             validate_bundle(output)
             if not (output / 'observed_free.npz').is_file():
                 raise ValueError(f'导航缓存缺少通行区域文件: {output}')
+            print(f'复用已完成的导航地图缓存：{output.name}', file=sys.stderr, flush=True)
             return output
         print('正在适配点云坐标，并使用原 Go2 的实测通行栅格和去噪策略生成导航地图……',
               file=sys.stderr, flush=True)
@@ -252,3 +284,4 @@ if __name__ == '__main__':
         print(prepare(args.version, args.cache))
     except (KeyError, TypeError, ValueError, OSError, RuntimeError) as exc:
         ap.exit(1, f'导航地图适配失败：{exc}\n')
+
