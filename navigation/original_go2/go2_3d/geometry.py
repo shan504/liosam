@@ -149,7 +149,7 @@ class ObservedGrid:
         self.free.update(self.prepare_observation(points, origin))
 
     def export(self, points, directory, floor_z=-0.30, min_height=0.10, max_height=1.5,
-               ground_model=None):
+               ground_model=None, allow_empty_obstacles=False):
         if ground_model is None:
             obstacle = points[(points[:,2] >= floor_z+min_height) &
                               (points[:,2] <= floor_z+max_height)]
@@ -166,7 +166,7 @@ class ObservedGrid:
         for offset in range(0, len(obstacle), 65536):
             occupied.update(map(tuple, np.floor(
                 obstacle[offset:offset + 65536, :2] / self.resolution).astype(np.int64)))
-        if not occupied or not self.free:
+        if (not occupied and not allow_empty_obstacles) or not self.free:
             raise ValueError("No occupied or observed-free cells; check height slice and sensor data")
         # Find sparse extents without duplicating both sets into their union and
         # a full coordinate array. Preserve the original two-cell unknown border.

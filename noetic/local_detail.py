@@ -17,6 +17,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'navigation'))
 from obstacle_view import obstacle_mask
 from dense_map import cell_ids, geometry, hashes
+from corridor_export import load_corridor_document
+from corridor_recorder import pose_matrix
+from surveyed_corridor import CorridorIndex
 
 GLOBAL = "/go2_visual/dense_map"
 REGISTERED = "/lio_sam/mapping/cloud_registered_raw"
@@ -124,6 +127,15 @@ class Window:
                         raw = np.frombuffer(blob, dtype='<f4').reshape(-1, 4)
                     corrected = to_ground(raw, json.loads(encoded), tf)
                     cache[t] = (anchor, encoded, tf, raw, corrected)
+            # This view reads raw historical scans, not the dense publisher's
+            # already filtered points. Read corridor events and optimized poses
+            # in the same transaction, so a loop closure cannot mix versions.
+            document = load_corridor_document(db, frame)
+            corridor = None
+            if document is not None and document['poses']:
+                ground_from_source = pose_matrix(tf)
+                corridor = CorridorIndex([ground_from_source @ np.asarray(event['body_pose'])
+                                          for event in document['poses']])
         finally:
             db.rollback()  # release the short read transaction (including on errors)
         self.frames = cache
@@ -133,7 +145,10 @@ class Window:
             if np.isfinite(live_pose[2]).all():
                 center_xyz = live_pose[2]
         center = rg@np.asarray(center_xyz)+ug
-        pts, n, vox = local_cloud([entry[4] for entry in cache.values()], center, band)
+        clouds = [entry[4] for entry in cache.values()]
+        if corridor is not None:
+            clouds = [points[~corridor.contains(points)] for points in clouds]
+        pts, n, vox = local_cloud(clouds, center, band)
         return rows[0][0], pts, (len(rows), n, vox)
 
 
@@ -321,3 +336,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

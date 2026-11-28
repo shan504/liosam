@@ -99,13 +99,17 @@ class MappingDisplay(unittest.TestCase):
             publishers[topic] = pub
             return pub
 
-        def subscribe(topic, _msg_type, callback, callback_args, **options):
-            subscribers[topic] = lambda msg: callback(msg, callback_args)
+        def subscribe(topic, _msg_type, callback, callback_args=None, **options):
+            subscribers[topic] = (lambda msg: callback(msg, callback_args)) if callback_args else callback
             return subscribers[topic]
 
         ros = SimpleNamespace(init_node=lambda name: None, spin=lambda: None,
                               Publisher=publisher, Subscriber=subscribe)
-        with patch.dict(sys.modules, {'rospy': ros, 'sensor_msgs.msg': SimpleNamespace(PointCloud2=object)}):
+        tf = SimpleNamespace(Buffer=lambda: object(), TransformListener=lambda buffer: None,
+                             LookupException=LookupError, ConnectivityException=ConnectionError,
+                             ExtrapolationException=TimeoutError)
+        with patch.dict(sys.modules, {'rospy': ros, 'sensor_msgs.msg': SimpleNamespace(PointCloud2=object),
+                                     'std_msgs.msg': SimpleNamespace(String=object), 'tf2_ros': tf}):
             main()
         cloud, records = organized_cloud([(1., 2., 0.), (1., 2., 6.)], True)
         for name in ('dense_map', 'scan'):
@@ -118,3 +122,4 @@ class MappingDisplay(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

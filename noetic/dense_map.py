@@ -268,6 +268,43 @@ class Archive:
         self.poses = {}
         self.origin = None
         self.frame = None
+        self.corridor_mount = None
+        self.corridors = {}
+
+    def enable_corridor(self, mount):
+        from corridor_recorder import mount_from_parameter, pose_matrix
+        from surveyed_corridor import POLICY
+        mount = mount_from_parameter(mount)
+        if self.corridor_mount is not None:
+            before = pose_matrix(self.corridor_mount['xyz'] + self.corridor_mount['xyzw'])
+            after = pose_matrix(mount['xyz'] + mount['xyzw'])
+            if mount['child'] != self.corridor_mount['child'] or not np.allclose(before, after, atol=1e-9, rtol=0.):
+                raise ValueError('Mapping corridor mount changed during this archive; start a new map')
+            return
+        self.db.execute('CREATE TABLE corridor_events (stamp INTEGER PRIMARY KEY, anchor INTEGER NOT NULL, body_relative TEXT NOT NULL)')
+        marker = dict(policy=POLICY, enabled=True, mount=mount)
+        self.db.execute('INSERT INTO meta VALUES(?,?)', ('surveyed_corridor', json.dumps(marker, allow_nan=False)))
+        self.corridor_mount = mount
+
+    def add_corridor(self, stamp, anchor, relative):
+        if self.corridor_mount is None:
+            raise ValueError('Mapping corridor was not enabled for this new archive')
+        row = self.db.execute('SELECT anchor FROM scans WHERE stamp=?', (stamp,)).fetchone()
+        if row != (anchor,):
+            raise ValueError('Corridor event must reference its exact archived scan and anchor')
+        relative = np.asarray(relative, dtype=float)
+        from surveyed_corridor import CorridorIndex
+        CorridorIndex([relative])  # Validate a rigid matrix before writing persistent evidence.
+        self.db.execute('INSERT INTO corridor_events VALUES(?,?,?)',
+                        (stamp, anchor, json.dumps(relative.tolist(), allow_nan=False)))
+        self.corridors[stamp] = (anchor, relative.copy())
+
+    def corridor_events(self, anchors):
+        """Return event geometry in the same anchor versions as the active view."""
+        from corridor_recorder import pose_matrix
+        return [dict(stamp_ns=stamp, anchor_stamp_ns=anchor,
+                     body_pose=(pose_matrix(anchors[anchor]) @ relative).tolist())
+                for stamp, (anchor, relative) in sorted(self.corridors.items()) if anchor in anchors]
 
     def path(self, frame, rows):
         if not rows:
@@ -294,6 +331,15 @@ class Archive:
 def pose_values(row):
     p, q = row.pose.position, row.pose.orientation
     return (p.x, p.y, p.z, q.x, q.y, q.z, q.w)
+
+
+def preview_corridor_mask(points, events, ground_from_source):
+    """Select the canonical ground-horizontal rectangle without moving output XYZ."""
+    from surveyed_corridor import CorridorIndex, rigid_matrix
+    matrix = rigid_matrix(ground_from_source)
+    poses = [matrix @ rigid_matrix(event['body_pose']) for event in events]
+    xyz = np.asarray(points)[:, :3] @ matrix[:3, :3].T + matrix[:3, 3]
+    return CorridorIndex(poses).contains(xyz)
 
 
 class Inputs:
@@ -342,9 +388,12 @@ class Inputs:
 
 def run():
     import rospy
-    from nav_msgs.msg import Path as RosPath
+    from nav_msgs.msg import Path as RosPath, Odometry
     from sensor_msgs.msg import PointCloud2, PointField
-    from std_msgs.msg import Header
+    from std_msgs.msg import Header, String
+    from corridor_recorder import CorridorRecorder, mount_from_parameter
+    from surveyed_corridor import CorridorIndex, make_document
+    import tf2_ros
     import tempfile
 
     rospy.init_node("go2_l1_style_dense")
@@ -353,6 +402,9 @@ def run():
     limit = int(rospy.get_param("~max_points", 450000))
     period = float(rospy.get_param("~period", 3.5))
     sample = float(rospy.get_param("~scan_period", .09))
+    surveyed = bool(rospy.get_param('~surveyed_corridor', False))
+    corridor_pose_topic = str(rospy.get_param('~corridor_pose_topic', '/lio_sam/mapping/odometry'))
+    corridor_motion_topic = str(rospy.get_param('~corridor_motion_topic', '/go2_lio/native_lidar_pose'))
     distance = float(rospy.get_param("~reproject_translation", .02))
     angle = float(rospy.get_param("~reproject_rotation_deg", .15))
     interval = float(rospy.get_param("~reproject_interval", 5.))
@@ -369,9 +421,29 @@ def run():
     preview = MapPreview(voxel, limit, distance, angle, interval, fine_voxel)
     inputs = Inputs()
     target = rospy.Publisher(OUTPUT, PointCloud2, queue_size=1, latch=True)
+    corridor_pub = (rospy.Publisher('/go2_mapping/surveyed_corridor', String, queue_size=1, latch=True)
+                    if surveyed else None)
+    corridor_tf = tf2_ros.Buffer() if surveyed else None
+    corridor_listener = tf2_ros.TransformListener(corridor_tf) if surveyed else None
+    recorder = None
+
+    def corridor_pose(msg, source):
+        current = recorder
+        if current is None:
+            return
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        current.pose(source, msg.header.stamp.to_nsec(), msg.header.frame_id, msg.child_frame_id,
+                     [p.x, p.y, p.z, q.x, q.y, q.z, q.w], now_ns=rospy.Time.now().to_nsec())
+
     fields = [PointField(n, 4*i, PointField.FLOAT32, 1) for i,n in enumerate(("x","y","z","intensity"))]
     subs = [rospy.Subscriber(CLOUD, PointCloud2, inputs.cloud, queue_size=6, buff_size=8388608),
             rospy.Subscriber(PATH, RosPath, inputs.path, queue_size=6, buff_size=8388608)]
+    if surveyed:
+        subs.extend([rospy.Subscriber(corridor_pose_topic, Odometry, corridor_pose,
+                                     callback_args='world', queue_size=32),
+                     rospy.Subscriber(corridor_motion_topic, Odometry, corridor_pose,
+                                     callback_args='motion', queue_size=32)])
+        rospy.loginfo('人工确认建图通行区启用：前方 1m、左右各 0.5m，全部高度；仅记录同源戳已确认前进帧，原始扫描归档保留。')
     last_path = None
     last_capture = -10**18
     last_pub = 0.
@@ -382,6 +454,16 @@ def run():
     rate = rospy.Rate(20)
     try:
         while not rospy.is_shutdown():
+            if surveyed:
+                try:
+                    physical_mount = mount_from_parameter(rospy.get_param('/go2_mapping_front_filter/mount', None))
+                except (ValueError, TypeError, KeyError) as error:
+                    rospy.logwarn_throttle(5., '通行区等待真实安装外参，不记录猜测空闲区域：%s', error)
+                else:
+                    store.enable_corridor(physical_mount)
+                    if recorder is None:
+                        recorder = CorridorRecorder(physical_mount,
+                            same_pose_source=corridor_pose_topic == corridor_motion_topic)
             path, pairs, recent, dropped = inputs.take()
             if path is not None and path is not last_path:
                 rows = {row.header.stamp.to_nsec(): pose_values(row) for row in path.poses}
@@ -398,9 +480,19 @@ def run():
                     continue
                 local = transform(points, at_capture, inverse=True)
                 store.add(stamp, anchor, local)
+                if recorder is not None:
+                    recorder.scan(stamp, anchor, frame, at_capture, now_ns=rospy.Time.now().to_nsec())
                 last_scan_points = len(points)
                 preview.add(stamp, anchor, local, store.poses[anchor], points, at_capture)
                 last_capture, count, dirty = stamp, count + 1, True
+            if recorder is not None:
+                events = recorder.process(now_ns=rospy.Time.now().to_nsec())
+                for stamp, anchor, relative in events:
+                    store.add_corridor(stamp, anchor, relative)
+                if events:
+                    dirty = True
+                rospy.loginfo_throttle(10., '建图通行区：已确认前进 %d 帧，缺失/过期 %d，拒绝 %d；导航实时避障输入保留。',
+                                      recorder.confirmed, recorder.expired, recorder.rejected)
             store.db.commit()
             now = time.monotonic()
             if preview.maybe_begin(store, now):
@@ -409,6 +501,20 @@ def run():
                 dirty = True
             if dirty and now-last_pub >= period and len(preview.active.points):
                 p = preview.active.display_points()
+                if surveyed:
+                    events = store.corridor_events(preview.active.anchors)
+                    document = make_document(store.frame, events)
+                    corridor_pub.publish(String(data=json.dumps(document, allow_nan=False)))
+                    if events:
+                        try:
+                            from corridor_recorder import pose_matrix
+                            ground = corridor_tf.lookup_transform('go2_ground', store.frame, rospy.Time(0))
+                            t, q = ground.transform.translation, ground.transform.rotation
+                            matrix = pose_matrix([t.x, t.y, t.z, q.x, q.y, q.z, q.w])
+                            p = p[~preview_corridor_mask(p, events, matrix)]
+                        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                                tf2_ros.ExtrapolationException, ValueError) as error:
+                            rospy.logwarn_throttle(5., '通行区预览等待真实地面变换，当前不猜测清空区域：%s', error)
                 hdr = Header(stamp=rospy.Time(last_capture//10**9, last_capture%10**9), frame_id=store.frame)
                 target.publish(PointCloud2(header=hdr, height=1, width=len(p), fields=fields,
                                    is_bigendian=False, point_step=16, row_step=16*len(p),

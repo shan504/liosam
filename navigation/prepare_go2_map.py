@@ -4,6 +4,7 @@ import argparse
 import csv
 import fcntl
 import hashlib
+import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -18,7 +19,10 @@ from prepare_map import apply, point_array, read_json, rigid, transforms
 
 HERE = Path(__file__).resolve().parent
 GO2 = HERE / 'original_go2' / 'go2_3d'
+NOETIC = HERE.parent / 'noetic'
+sys.path.insert(0, str(NOETIC))
 sys.path.insert(0, str(GO2))
+from surveyed_corridor import CorridorIndex, read_document
 from denoise import clean_directory
 from geometry import ObservedGrid
 from ground import floor_and_obstacles
@@ -49,7 +53,7 @@ def cache_key(version, inputs):
     digest = hashlib.sha256()
     # The container always sees /map_source. Include actual per-version input
     # identities and the original grid policy used to generate the cached map.
-    for path in [Path(__file__), HERE / 'prepare_map.py',
+    for path in [Path(__file__), HERE / 'prepare_map.py', NOETIC / 'surveyed_corridor.py',
                  *[GO2 / p for p in ('geometry.py', 'grid_io.py', 'ground.py', 'terrain.py', 'denoise.py',
                                      'free_space.py', 'navigation_grid.py',
                                      'navigation_grid.yaml', 'navigation_filter.yaml', 'map_start.py',
@@ -66,7 +70,7 @@ def cache_key(version, inputs):
     return 'original-go2-' + digest.hexdigest()[:24]
 
 
-def export_grid(chunks, grid, directory, policy, model):
+def export_grid(chunks, grid, directory, policy, model, surveyed_free=None):
     """Compress duplicate XY evidence before invoking Go2's grid exporter.
 
     XYZI archives keep repeated scans of every surface. Go2's export only
@@ -98,11 +102,21 @@ def export_grid(chunks, grid, directory, policy, model):
         cells, indices = np.unique(np.floor(obstacles[:, :2]/grid.resolution).astype(np.int64),
                                    axis=0, return_index=True)
         occupied.update(zip(map(tuple, cells), map(tuple, obstacles[indices])))
-    print(f'正在导出完整导航栅格：实测通行 {len(grid.free):,} 格，'
+    if surveyed_free:
+        # Explicit operator survey evidence is recorded only in new sessions.
+        # This is not inferred from missing returns or a terrain fit. Preserve
+        # full-cell footprint boundaries and never extend through pose gaps.
+        grid.free.update(surveyed_free)
+        for cell in surveyed_free:
+            occupied.pop(cell, None)
+        print(f'人工确认的前行通行带：{len(surveyed_free):,} 格（前方 1m、左右各 0.5m）',
+              file=sys.stderr, flush=True)
+    print(f'正在导出完整导航栅格：通行 {len(grid.free):,} 格，'
           f'障碍 {len(occupied):,} 格，分辨率 {grid.resolution:g} m',
           file=sys.stderr, flush=True)
     samples = np.asarray(list(occupied.values()), dtype=np.float32).reshape(-1, 3)
-    grid.export(samples, directory, floor_z=0., min_height=low, max_height=high, ground_model=model)
+    grid.export(samples, directory, floor_z=0., min_height=low, max_height=high,
+                ground_model=model, allow_empty_obstacles=bool(surveyed_free))
 
 
 def observed_free_support(grid, xy):
@@ -194,9 +208,32 @@ def classification_chunks(raw, transform):
         progress.report(min(offset+len(values), len(raw)))
 
 
+def survey_contract(version, manifest):
+    """Only an explicit new-session export can authorize a cleared corridor."""
+    filename = manifest['dense'].get('surveyed_corridor')
+    if filename is None:
+        return None, []
+    if (not isinstance(filename, str) or not filename or Path(filename).name != filename
+            or filename in ('.', '..')):
+        raise ValueError('无效的建图通行带文件名')
+    document = read_document(version / filename,
+                             expected_frame=manifest['dense']['frame_id'].strip('/'))
+    names = [filename]
+    if document['poses']:
+        terrain = document.get('terrain')
+        if not isinstance(terrain, dict):
+            raise ValueError('已清理通行带的地图缺少清理前地形模型')
+        name = terrain.get('file')
+        if not isinstance(name, str) or not name or Path(name).name != name or name in ('.', '..'):
+            raise ValueError('无效的建图地形模型文件名')
+        names.append(name)
+    return document, names
+
+
 def trace_archive(version, dest, manifest, files):
     source = manifest['dense']['frame_id'].strip('/')
     ground, mount, sensor = transforms(version, source)
+    survey, _ = survey_contract(version, manifest)
     raw = point_array(version / files[0])
     if len(raw) != manifest['dense']['points'] or len(raw) < 100:
         raise ValueError('地图点数不足或与 manifest 不符')
@@ -220,6 +257,26 @@ def trace_archive(version, dest, manifest, files):
 
     policy = current_settings()
     grid = ObservedGrid(policy['grid_resolution'])
+    surveyed_free = set()
+    saved_terrain = None
+    if survey is not None and survey['poses']:
+        contract = survey['terrain']
+        for field, expected in [('map_from_source_map', ground), ('body_from_lidar', mount)]:
+            actual = np.asarray(contract.get(field), dtype=float)
+            if actual.shape != (4, 4) or not np.isfinite(actual).all() or not np.allclose(actual, expected, atol=1e-7, rtol=0):
+                raise ValueError('通行带地形标定与地图不一致：' + field)
+        if (contract.get('source_frame') != source or
+                not np.isclose(float(contract.get('body_height_above_ground', float('nan'))),
+                               body_height, atol=1e-6, rtol=0)):
+            raise ValueError('通行带地形的坐标系或机身高度与地图不一致')
+        saved_terrain = load_terrain(version, {'terrain_model': contract})
+        if saved_terrain is None:
+            raise ValueError('缺少清理前地形，不能把已删除的回波当作地面')
+        # The source LIO frame may be tilted. Define the all-height rectangle
+        # in the calibrated ground frame, with heading from the full body pose.
+        corridor = CorridorIndex([ground @ np.asarray(event['body_pose']) for event in survey['poses']])
+        for cells in corridor.free_cells(grid.resolution):
+            surveyed_free.update(map(tuple, cells))
     n = len(raw)
     n_scans = first = exact = 0
     progress = Progress('恢复实测通行区域（扫描帧）', manifest['dense']['scans'])
@@ -227,11 +284,12 @@ def trace_archive(version, dest, manifest, files):
         for row in csv.DictReader(stream):
             stamp, anchor = int(row['stamp_ns']), int(row['anchor_stamp_ns'])
             offset, count = int(row['first_point_index']), int(row['point_count'])
-            if offset != first or count <= 0 or offset + count > n or anchor not in keyframes:
+            if (offset != first or count < 0 or (count == 0 and survey is None)
+                    or offset + count > n or anchor not in keyframes):
                 raise ValueError('逐帧索引与地图或关键帧不一致')
             # Other scan poses are unavailable in this archive. Their endpoints
             # are valid; their keyframe anchors are not their beam origins.
-            if stamp == anchor:
+            if count and stamp == anchor:
                 xyz = apply(raw[offset:offset+count], ground).astype('<f4')
                 if not np.isfinite(xyz).all():
                     raise ValueError('点云包含无效 XYZ')
@@ -263,11 +321,16 @@ def trace_archive(version, dest, manifest, files):
                        'sz REAL,si REAL,hits INTEGER,ni INTEGER, PRIMARY KEY(x,y,z)) WITHOUT ROWID')
             for _ in aligned_chunks(raw, ground, db, voxel):
                 pass
-            print('正在从局部点云和优化轨迹建立地形高程（不使用统一地面高度）……',
-                  file=sys.stderr, flush=True)
-            terrain = build_terrain(voxel_chunks(db), anchors, work_directory=Path(tmp),
-                                    progress=lambda stage, count: print(
-                                        f'局部地形：{stage} {count:,}', file=sys.stderr, flush=True))
+            if saved_terrain is None:
+                print('正在从局部点云和优化轨迹建立地形高程（不使用统一地面高度）……',
+                      file=sys.stderr, flush=True)
+                terrain = build_terrain(voxel_chunks(db), anchors, work_directory=Path(tmp),
+                                        progress=lambda stage, count: print(
+                                            f'局部地形：{stage} {count:,}', file=sys.stderr, flush=True))
+            else:
+                terrain = saved_terrain
+                print('复用本次建图清理前记录的局部地形；通行带作为单独人工确认信息。',
+                      file=sys.stderr, flush=True)
             statistics = terrain.statistics
             print(f'局部地形完成：支持 {statistics["supported_cells"]:,}/'
                   f'{statistics["candidate_cells"]:,} 个候选格；'
@@ -275,7 +338,7 @@ def trace_archive(version, dest, manifest, files):
                   file=sys.stderr, flush=True)
             terrain_metadata = terrain.save(dest/'terrain.npz')
             export_grid(classification_chunks(raw, ground), grid, dest, policy,
-                        dict(model, _terrain=terrain))
+                        dict(model, _terrain=terrain), surveyed_free=surveyed_free)
             retained = write_voxel_map(db, dest/'map.pcd', voxel)
     print('正在按原规则去除导航栅格孤立噪点……', file=sys.stderr, flush=True)
     report = clean_directory(dest, free_support=lambda xy: observed_free_support(grid, xy))
@@ -288,6 +351,13 @@ def trace_archive(version, dest, manifest, files):
                     body_from_lidar=mount.tolist(), sensor_frame=sensor, source_frame=source,
                     parameters=dict(policy, map_name=name, floor_z=0., map_voxel_size=voxel), free_area_version=2,
                     exact_origin_scans=exact, scans=n_scans, navigation_denoise=report)
+    if survey is not None:
+        runtime_survey = dict(survey)
+        if 'terrain' in survey:
+            runtime_survey['terrain'] = dict(survey['terrain'], file='terrain.npz')
+        (dest/'surveyed_corridor.json').write_text(json.dumps(runtime_survey, ensure_ascii=False, indent=2)+'\n')
+        metadata['surveyed_corridor'] = dict(file='surveyed_corridor.json',
+            events=len(survey['poses']), free_cells=len(surveyed_free), policy=survey['policy'])
     (dest / 'metadata.yaml').write_text(yaml.safe_dump(metadata))
     print(f'原始回波 {n}，定位地图 {retained} 个体素（{voxel:g} m）', file=sys.stderr, flush=True)
 
@@ -301,7 +371,8 @@ def prepare(version, cache):
     files = [manifest[field] for field in ('map_file', 'scan_index', 'optimized_keyframes')]
     if any(not isinstance(v, str) or not v or v != Path(v).name or v in ('.', '..') for v in files):
         raise ValueError('地图清单包含无效的输入文件名')
-    key = cache_key(version, files + ['manifest.json', 'live/reference_transforms.json',
+    survey, survey_files = survey_contract(version, manifest)
+    key = cache_key(version, files + survey_files + ['manifest.json', 'live/reference_transforms.json',
                                       'live/body_from_lidar.json', 'calibration/floor.json',
                                       'calibration/body_from_lidar.json'])
     cache.mkdir(parents=True, exist_ok=True)
@@ -315,6 +386,14 @@ def prepare(version, cache):
                 raise ValueError(f'导航缓存缺少局部地形模型: {output}')
             if not (output / 'observed_free.npz').is_file():
                 raise ValueError(f'导航缓存缺少通行区域文件: {output}')
+            if survey is not None:
+                cached_survey = read_document(output/'surveyed_corridor.json',
+                                              expected_frame=survey['frame_id'])
+                expected_survey = dict(survey)
+                if 'terrain' in survey:
+                    expected_survey['terrain'] = dict(survey['terrain'], file='terrain.npz')
+                if cached_survey != expected_survey:
+                    raise ValueError(f'导航缓存通行带与源地图不一致: {output}')
             print(f'复用已完成的导航地图缓存：{output.name}', file=sys.stderr, flush=True)
             return output
         print('正在适配点云坐标，并使用原 Go2 的实测通行栅格和去噪策略生成导航地图……',

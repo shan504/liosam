@@ -83,6 +83,11 @@ def save(rospy, name, home):
                             '点云来自本次归档的配准回波；锚点不等于每帧精确的雷达光心。',
                             '当前导出为三维先验地图；二维导航栅格可在规划阶段按所需高度和分辨率构建。',
                             '原始 LiDAR 包、IMU、RGB 和高频本体里程计历史不在地图归档内。'])
+        if dense.get('surveyed_corridor'):
+            manifest['limitations'].append(
+                '本轮采用人工确认前行通行带：前方 0–1m、左右各 0.5m，全部高度。'
+                '主 PCD 已按优化位姿清理历史回波；surveyed_corridor.json 记录范围，'
+                '清理前局部地形另存，原扫描 SQLite 保留在本轮运行归档。')
         (stage / 'manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False)+'\n',
                                              encoding='utf-8')
         print('正在生成文件校验清单……')
@@ -93,6 +98,11 @@ def save(rospy, name, home):
         raise
     print('地图保存完成：' + str(final / (name + '.pcd')))
     print('地图坐标系 %s；%d 帧；%d 点。' % (dense['frame_id'], dense['scans'], dense['points']))
+    if dense.get('surveyed_corridor'):
+        print('本轮记录 %d 段前行通行带，清除 %d 个历史回波。旧地图未修改。' %
+              (dense['corridor_events'], dense['cleared_points']))
+        if not dense['corridor_events']:
+            print('本轮没有确认的前进记录，未清理点云或强制设置通行格；请检查 F_dense.log 的前进计数。')
     for warning in run['warnings']:
         print('标定/来源备注：' + warning)
     if not live['ground_tf_available']:
@@ -124,3 +134,4 @@ if __name__ == '__main__':
         main()
     except (Exception, KeyboardInterrupt) as exc:
         sys.exit('保存未完成：%s' % (exc or '中断'))
+
