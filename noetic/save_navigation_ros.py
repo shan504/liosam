@@ -130,6 +130,7 @@ def capture(destination):
         'transforms': transforms, 'unavailable': missing})
 
     namespaces = ['/lio_sam', '/go2_ground_view', '/go2_native_lio_seed', '/go2_l1_style_dense',
+                  '/go2_mapping_front_filter',
                   '/go2_d435/realsense2_camera', '/mid360s_attitude', '/use_sim_time',
                   '/rosdistro', '/run_id']
     absent = object()

@@ -38,7 +38,9 @@ if [[ $mode == check ]]; then
     exec /usr/bin/python3 -u "$here/check_stop.py"
 fi
 files=("$HOME/go2_model_live.pyz" "$here/dense_map.py" "$here/bridge_topics.json" "$here/foxglove_endpoint.py" "$here/display_map_frame.py"
-       "$here/../navigation/obstacle_view.py")
+       "$here/../navigation/obstacle_view.py" "$here/mapping_front_filter.py"
+       "$here/native_lio_seed.py" "$here/native_cloud.py" "$here/native_mount.py"
+       "$here/native_inspect_tf.py" "$here/mount_setup.py" "$here/check_returns.py")
 if [[ $mode == native || $mode == go2 ]]; then
     files+=("$here/native_odom.sh" "$here/native_odom.py" "$here/native_sensor_clock.py"
             "$here/native_model.py" "$here/native_cloud.py" "$here/native_mount.py" "$here/native_inspect_tf.py" "$here/check_returns.py")
@@ -109,9 +111,11 @@ if graph is not None:
         "/go2_ground_view", "/go2_mapping_obstacles", "/go2_live_model_view", "/go2_visual_model",
         "/go2_native_odom_bridge", "/go2_native_cloud", "/go2_native_model",
         "/go2_native_lio_seed", "/go2_d435_display", "/go2_display_map_frame",
+        "/go2_mapping_front_filter",
     }
     topics = {
         "/livox/lidar", "/livox/imu", "/mid360s/imu_si", "/mid360s/imu_filtered",
+        "/go2_mapping/lidar_front",
         "/lio_sam/mapping/odometry", "/lio_sam/mapping/cloud_registered_raw",
         "/go2_native/odometry", "/go2_native/registered_scan",
         "/go2_visual/dense_map", "/go2_visual/ground/dense_map",
@@ -283,11 +287,11 @@ check_alive() {
         fi
     done
 }
-declare -A progress_lines=([E_ground]=0 [F_dense]=0 [G_model]=0 [I_motion]=0)
+declare -A progress_lines=([A_front_filter]=0 [E_ground]=0 [F_dense]=0 [G_model]=0 [I_motion]=0)
 declare -A progress_seen=()
 show_progress() {
     local name count line
-    for name in E_ground F_dense G_model I_motion; do
+    for name in A_front_filter E_ground F_dense G_model I_motion; do
         [[ -f $run_dir/$name.log ]] || continue
         count=$(wc -l <"$run_dir/$name.log")
         if (( count > progress_lines[$name] )); then
@@ -300,6 +304,7 @@ show_progress() {
                         fi
                         ;;
                     I_motion:*) printf '%s\n' "$line" ;;
+                    A_front_filter:*) printf '%s\n' "$line" ;;
                     F_dense:*Dense:*scans\ saved*) printf '%s\n' "$line" ;;
                 esac
             done < <(sed -n "$((progress_lines[$name]+1)),${count}p" "$run_dir/$name.log")
@@ -311,6 +316,7 @@ wait_topic() {
     local topic=$1
     until timeout 15s rostopic echo -n 1 "$topic" > /dev/null 2>&1; do
         check_alive
+        show_progress
         echo "仍在等待 $topic，节点仍运行，继续等待……"
     done
     check_alive
@@ -372,14 +378,17 @@ fi
 if [[ $mode == native ]]; then
     start G_model /usr/bin/python3 -u "$here/native_model.py"
     start A_lidar roslaunch -p 11321 livox_ros_driver2 msg_MID360s.launch
-    start C_native_cloud /usr/bin/python3 -u "$here/native_cloud.py"
+    start A_front_filter /usr/bin/python3 -u "$here/mapping_front_filter.py" _uses_lio:=false
+    wait_topic /go2_mapping/lidar_front/point_num
+    start C_native_cloud /usr/bin/python3 -u "$here/native_cloud.py" \
+        /livox/lidar:=/go2_mapping/lidar_front
     start F_dense /usr/bin/python3 -u "$here/dense_map.py" \
         /lio_sam/mapping/cloud_registered_raw:=/go2_native/registered_scan \
         /lio_sam/mapping/path:=/go2_native/path "_archive_dir:=$run_dir/dense" \
         _voxel:=0.015 _fine_voxel:=0.0075 _max_points:=450000 _scan_period:=0.09 _period:=3.5
     echo '原生里程计模式。请在平地站稳后开始。模型等 Go2 本体位姿，点云等机身到雷达的标定和同时段的位姿。'
     # Follow by descriptor; each child owns its log for this run.
-    tail -n +1 -q -f "$run_dir"/{B_native,C_native_cloud,G_model,F_dense}.log &
+    tail -n +1 -q -f "$run_dir"/{B_native,A_front_filter,C_native_cloud,G_model,F_dense}.log &
     status_tail=$!
     while :; do sleep 2; check_alive; done
 fi
@@ -422,6 +431,9 @@ start B_attitude rosrun imu_filter_madgwick imu_filter_node __name:=mid360s_atti
 wait_topic /mid360s/imu_filtered/header
 
 rosparam load "$lio_share/config/paramsLivoxIMU.yaml"
+# One mapping-only input for every map and both LIO launch paths. The driver
+# remains 360 degrees for diagnostics and the separate navigation process.
+rosparam set /lio_sam/pointCloudTopic /go2_mapping/lidar_front
 rosparam set /lio_sam/imuTopic /mid360s/imu_filtered
 rosparam set /lio_sam/imuType 1
 # Disable supplemental synthesized-attitude correction in incremental odometry.
@@ -429,6 +441,10 @@ rosparam set /lio_sam/imuRPYWeight 0.0
 rosparam set /lio_sam/extrinsicRPY '[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]'
 rosparam set /lio_sam/useImuHeadingInitialization false
 rosparam set /lio_sam/savePCD false
+start A_front_filter /usr/bin/python3 -u "$here/mapping_front_filter.py"
+wait_topic /go2_mapping/lidar_front/point_num
+show_progress
+echo '所有新建地图仅写入机身前方回波（base_link X>=0），后方回波不参与配准、回环和地图保存。'
 if [[ $mode == go2 ]]; then
     rosparam set /lio_sam/odomTopic /go2_lio/unused_projection_odom
     rosparam set /lio_sam/loopClosureEnableFlag true
