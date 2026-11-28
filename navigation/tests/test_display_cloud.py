@@ -28,6 +28,52 @@ def message(points, *, frame='map', stamp=(5, 7)):
 
 
 class DisplayCloudGeometry(unittest.TestCase):
+    def test_live_display_uses_classified_obstacles_without_plane_or_road_refilter(self):
+        from geometry import pose_matrix
+        transform = pose_matrix([10., 4., 3.], [0., 0., np.sin(np.pi/4), np.cos(np.pi/4)])
+        cloud = message([[1., 0., -.2], [0., 2., 6.], [np.nan, 0., 0.]], frame='base_link')
+        np.testing.assert_allclose(display_cloud.live_display_points(cloud, transform),
+                                   [[10., 5., 2.8], [8., 4., 9.]], atol=1e-6)
+        self.assertEqual(cloud.header.frame_id, 'base_link')
+        with self.assertRaisesRegex(ValueError, 'base_link'):
+            display_cloud.live_display_points(message([[1.,2.,3.]], frame='odom'), transform)
+
+    def test_surveyed_road_mask_is_static_only_and_uses_each_selected_map_frame(self):
+        from surveyed_corridor import make_document
+        with tempfile.TemporaryDirectory() as temp:
+            for name, offset in [('orchard_new', [5., -3., 1.]), ('yard_new', [-2., 7., -.4])]:
+                with self.subTest(map=name):
+                    directory = Path(temp) / name
+                    directory.mkdir()
+                    source_from_map = np.eye(4)
+                    source_from_map[:3, 3] = offset
+                    body = source_from_map.copy()
+                    row = dict(stamp_ns=1, anchor_stamp_ns=1, body_pose=body.tolist())
+                    (directory / 'surveyed_corridor.json').write_text(json.dumps(make_document('saved', [row])))
+                    metadata = dict(source_frame='saved', map_from_source_map=np.linalg.inv(source_from_map).tolist(),
+                                    surveyed_corridor=dict(file='surveyed_corridor.json'))
+                    corridor = display_cloud.load_display_corridor(directory, metadata)
+                    cloud = message([[.4, .1, .4], [.4, .1, 5.], [.4, .8, .4], [2., 0., 3.]])
+                    model = dict(plane=[0., 0., 1., 0.])
+                    np.testing.assert_allclose(display_cloud.display_points(cloud, model, corridor=corridor),
+                                               [[.4, .8, .4], [2., 0., 3.]])
+                    # Same live scan must keep an actual person or obstacle
+                    # in the road: the recorded corridor is no blind zone.
+                    self.assertEqual(len(display_cloud.display_points(cloud, model)), 4)
+                    metadata['surveyed_corridor']['file'] = '../surveyed_corridor.json'
+                    with self.assertRaises(ValueError):
+                        display_cloud.load_display_corridor(directory, metadata)
+
+    def test_scan_freshness_requires_live_localization_and_source_timestamp(self):
+        current = display_cloud.scan_is_current
+        self.assertTrue(current(10_000_000_000, 10_500_000_000, True, 100., 100.1))
+        self.assertFalse(current(10_000_000_000, 10_500_000_000, False, 100., 100.1))
+        self.assertFalse(current(10_000_000_000, 10_500_000_000, True, None, 100.1))
+        self.assertFalse(current(10_000_000_000, 10_500_000_000, True, 100., 101.))
+        self.assertFalse(current(10_000_000_000, 12_000_000_000, True, 100., 100.1))
+        self.assertFalse(current(12_000_000_000, 10_000_000_000, True, 100., 100.1))
+        self.assertFalse(current(0, 0, True, 100., 100.1))
+
     def test_two_selected_map_planes_keep_obstacles_and_not_ground(self):
         scenarios = [('yard_body_origin', np.array([0., 0., 1., .327])),
                      ('orchard_tilted', np.array([.05, -.08, 1., -.6]))]
@@ -113,7 +159,11 @@ class DisplayCloudGeometry(unittest.TestCase):
             class FakeNode:
                 def __init__(self, name):
                     self.name, self.subs, self.pubs, self.timers = name, {}, {}, []
+                    self.now_ns = 7_000_000_002
                     nodes.append(self)
+                def get_clock(self):
+                    return NS(now=lambda:NS(nanoseconds=self.now_ns, to_msg=lambda:NS(
+                        sec=self.now_ns//10**9, nanosec=self.now_ns%10**9)))
                 def declare_parameter(self, name, default):
                     pass
                 def get_parameter(self, name):
@@ -131,34 +181,72 @@ class DisplayCloudGeometry(unittest.TestCase):
                     pass
 
             def spin(node):
-                self.assertEqual(set(node.subs), {'/map_cloud','/registered_cloud'})
+                self.assertEqual(set(node.subs), {'/map_cloud',display_cloud.OBSTACLE_TOPIC,'/localization/valid'})
                 self.assertEqual(node.timers[0][0], .2)
+                node.subs['/localization/valid'][0](NS(data=True))
                 retained = node.pubs[display_cloud.MAP_TOPIC].qos
                 self.assertEqual(retained.durability, 'transient_local')
                 self.assertEqual(retained.reliability, 'reliable')
                 original = message([[1,2,-.3],[3,4,.2]])
                 node.subs['/map_cloud'][0](original)
-                node.subs['/registered_cloud'][0](message([[5,6,.3]], stamp=(7,1)))
-                latest = message([[7,8,.4]], stamp=(7,2))
-                node.subs['/registered_cloud'][0](latest)
+                node.subs[display_cloud.OBSTACLE_TOPIC][0](message([[5,6,.3]], frame='base_link', stamp=(7,1)))
+                latest = message([[7,8,.4]], frame='base_link', stamp=(7,2))
+                node.subs[display_cloud.OBSTACLE_TOPIC][0](latest)
                 node.timers[0][1]()
                 self.assertEqual(len(node.pubs[display_cloud.MAP_TOPIC].messages), 1)
                 self.assertEqual(len(node.pubs[display_cloud.SCAN_TOPIC].messages), 1)
                 output = node.pubs[display_cloud.SCAN_TOPIC].messages[0]
                 np.testing.assert_array_equal(output.points, [[7,8,np.float32(.4)]])
                 self.assertEqual(output.header.stamp.nanosec, 2)
-                self.assertEqual(latest.header.frame_id, 'map')
+                self.assertEqual(latest.header.frame_id, 'base_link')
+                self.assertEqual(output.header.frame_id, 'map')
+                self.assertEqual(node.buffer.calls[-1], ('map', 'base_link', 7_000_000_002))
                 node.subs['/map_cloud'][0](original)
-                node.subs['/registered_cloud'][0](message([[90,90,90]], stamp=(7,1)))
+                node.subs[display_cloud.OBSTACLE_TOPIC][0](message([[90,90,90]], frame='base_link', stamp=(7,1)))
                 node.timers[0][1]()
                 self.assertEqual(len(node.pubs[display_cloud.MAP_TOPIC].messages), 1)
                 self.assertEqual(len(node.pubs[display_cloud.SCAN_TOPIC].messages), 1)
-                node.subs['/registered_cloud'][0](message([[1,2,-.3]], stamp=(8,0)))
+                # An explicit invalid state removes old display points only.
+                node.subs['/localization/valid'][0](NS(data=False))
+                self.assertEqual(node.pubs[display_cloud.SCAN_TOPIC].messages[-1].points.shape, (0,3))
+                self.assertEqual(len(node.pubs[display_cloud.MAP_TOPIC].messages), 1)
+                node.subs['/localization/valid'][0](NS(data=True))
+                node.now_ns = 8_000_000_000
+                node.subs[display_cloud.OBSTACLE_TOPIC][0](message([], frame='base_link', stamp=(8,0)))
                 node.timers[0][1]()
                 self.assertEqual(node.pubs[display_cloud.SCAN_TOPIC].messages[-1].points.shape, (0,3))
+                # Loss of new scans clears an old cloud even if validity is
+                # still published, preserving the untouched static map.
+                node.now_ns = 8_500_000_000
+                node.subs[display_cloud.OBSTACLE_TOPIC][0](message([[1,2,.5]], frame='base_link', stamp=(8,500000000)))
+                node.timers[0][1]()
+                self.assertEqual(len(node.pubs[display_cloud.SCAN_TOPIC].messages[-1].points), 1)
+                node.now_ns = 10_000_000_000
+                node.timers[0][1]()
+                self.assertEqual(node.pubs[display_cloud.SCAN_TOPIC].messages[-1].points.shape, (0,3))
+                # Bag time rewind discards old-lap sequencing; a fresh valid
+                # report and low-timestamp scan can then display normally.
+                node.now_ns = 4_000_000_000
+                node.timers[0][1]()
+                node.subs['/localization/valid'][0](NS(data=True))
+                node.subs[display_cloud.OBSTACLE_TOPIC][0](message([[1,2,.5]], frame='base_link', stamp=(4,0)))
+                node.timers[0][1]()
+                self.assertEqual(len(node.pubs[display_cloud.SCAN_TOPIC].messages[-1].points), 1)
+                # Exact source-time TF can arrive after the cloud. The node
+                # waits and retries, without using latest or relabeling XYZ.
+                node.now_ns = 4_100_000_000
+                node.buffer.unavailable = True
+                node.subs[display_cloud.OBSTACLE_TOPIC][0](message([[3,4,.1]], frame='base_link', stamp=(4,100000000)))
+                node.timers[0][1]()
+                self.assertEqual(node.pubs[display_cloud.SCAN_TOPIC].messages[-1].points.shape, (0,3))
+                node.buffer.unavailable = False
+                node.timers[0][1]()
+                np.testing.assert_allclose(node.pubs[display_cloud.SCAN_TOPIC].messages[-1].points, [[3,4,.1]])
+                self.assertEqual(node.buffer.calls[-1], ('map', 'base_link', 4_100_000_000))
 
             mods = {}
-            for name in ('rclpy','rclpy.node','rclpy.qos','sensor_msgs','sensor_msgs.msg','ros_cloud'):
+            for name in ('rclpy','rclpy.node','rclpy.qos','sensor_msgs','sensor_msgs.msg',
+                         'std_msgs','std_msgs.msg','ros_cloud','rclpy.time','tf2_ros'):
                 mods[name] = ModuleType(name)
             mods['rclpy'].init = lambda:None
             mods['rclpy'].spin = spin
@@ -169,9 +257,24 @@ class DisplayCloudGeometry(unittest.TestCase):
             mods['rclpy.qos'].ReliabilityPolicy = NS(RELIABLE='reliable')
             mods['rclpy.qos'].DurabilityPolicy = NS(TRANSIENT_LOCAL='transient_local')
             mods['rclpy.qos'].qos_profile_sensor_data = object()
+            class FakeTransformException(Exception):
+                pass
+            class FakeBuffer:
+                def __init__(self):
+                    self.calls, self.unavailable = [], False
+                def lookup_transform(self, target, source, stamp):
+                    self.calls.append((target, source, stamp))
+                    if self.unavailable:
+                        raise FakeTransformException('future lookup')
+                    return NS(transform=NS(translation=NS(x=0.,y=0.,z=0.), rotation=NS(x=0.,y=0.,z=0.,w=1.)))
+            mods['rclpy.time'].Time = NS(from_msg=lambda stamp: stamp.sec*10**9+stamp.nanosec)
+            mods['tf2_ros'].Buffer = FakeBuffer
+            mods['tf2_ros'].TransformListener = lambda *args: None
+            mods['tf2_ros'].TransformException = FakeTransformException
             mods['sensor_msgs.msg'].PointCloud2 = object
+            mods['std_msgs.msg'].Bool = object
             mods['ros_cloud'].xyz_message = lambda header, points:NS(header=copy.deepcopy(header), points=points.copy())
-            with patch.dict(sys.modules, mods):
+            with patch.dict(sys.modules, mods), patch.object(display_cloud.time, 'monotonic', return_value=100.):
                 display_cloud.main()
             self.assertEqual(len(nodes), 1)
 

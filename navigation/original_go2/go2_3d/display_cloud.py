@@ -3,6 +3,7 @@
 import copy
 from pathlib import Path
 import sys
+import time
 
 import numpy as np
 import yaml
@@ -16,9 +17,39 @@ sys.path.insert(0, str(NAVIGATION))
 from obstacle_view import obstacle_mask
 from ground import heights
 from terrain import load_terrain
+from geometry import pose_matrix, transform_points
+
+NOETIC = NAVIGATION.parent / 'noetic'
+sys.path.insert(0, str(NOETIC))
+from surveyed_corridor import index_from_document, read_document, rigid_matrix
 
 MAP_TOPIC = '/navigation/display/map_obstacles'
 SCAN_TOPIC = '/navigation/display/scan_obstacles'
+OBSTACLE_TOPIC = '/navigation/measured_scan_obstacles'
+
+
+def scan_is_current(stamp_ns, now_ns, valid, valid_received, monotonic_now):
+    """Do not present a frozen registration as a current obstacle observation."""
+    return (valid and valid_received is not None and
+            0. <= monotonic_now - valid_received <= .5 and
+            stamp_ns > 0 and -.1e9 <= now_ns - stamp_ns <= 1.e9)
+
+
+def load_display_corridor(directory, metadata):
+    """Static road presentation uses the same selected-map geometry as its grid."""
+    descriptor = metadata.get('surveyed_corridor')
+    if descriptor is None:
+        return None
+    name = descriptor.get('file')
+    if (not isinstance(name, str) or not name or Path(name).name != name or
+            name in ('.', '..')):
+        raise ValueError('Display corridor must be local to the selected map bundle')
+    directory = Path(directory).resolve()
+    path = (directory / name).resolve()
+    if path.parent != directory:
+        raise ValueError('Display corridor must be local to the selected map bundle')
+    document = read_document(path, expected_frame=metadata['source_frame'])
+    return index_from_document(document, metadata['map_from_source_map'])
 
 
 def ground_model(metadata):
@@ -69,7 +100,7 @@ def xyz_blocks(message, block_size=65536):
             yield np.column_stack([chunk[name] for name in ('x', 'y', 'z')])
 
 
-def display_points(message, model, block_size=65536, terrain=None):
+def display_points(message, model, block_size=65536, terrain=None, corridor=None):
     """Select only display obstacles in map coordinates at all retained heights."""
     if message.header.frame_id.lstrip('/') != 'map':
         raise ValueError('Display input must already be registered in map; refusing to relabel coordinates')
@@ -84,6 +115,10 @@ def display_points(message, model, block_size=65536, terrain=None):
             # Unsupported terrain is never hidden as if it were known ground.
             # Keep genuine obstacles at every height, plus low/drop returns.
             result[finite] = ~supported | obstacle_mask(relative) | (relative <= -.10)
+        if corridor is not None:
+            # Only the static navigation presentation omits surveyed road
+            # returns. Full map geometry and live sensing keep their points.
+            result[finite] &= ~corridor.contains(block[finite])
         return result
 
     # Two bounded passes allocate exactly one final XYZ array, rather than a
@@ -99,11 +134,24 @@ def display_points(message, model, block_size=65536, terrain=None):
     return output
 
 
+def live_display_points(message, map_from_body):
+    """Display the Nav2 ground classifier's all-height companion without refiltering."""
+    if message.header.frame_id != 'base_link':
+        raise ValueError('Live obstacle display requires base_link input')
+    matrix = rigid_matrix(map_from_body)
+    blocks = [block[np.isfinite(block).all(axis=1)] for block in xyz_blocks(message)]
+    points = np.concatenate(blocks) if blocks else np.empty((0, 3), dtype='<f4')
+    return transform_points(points, matrix).astype('<f4')
+
+
 def main():
     import rclpy
     from rclpy.node import Node
+    from rclpy.time import Time
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profile_sensor_data
     from sensor_msgs.msg import PointCloud2
+    from std_msgs.msg import Bool
+    from tf2_ros import Buffer, TransformListener, TransformException
     from ros_cloud import xyz_message
 
     class DisplayCloud(Node):
@@ -114,6 +162,7 @@ def main():
             metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
             self.model = ground_model(metadata)
             self.terrain = load_terrain(directory, metadata)
+            self.corridor = load_display_corridor(directory, metadata)
             retained = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                   durability=DurabilityPolicy.TRANSIENT_LOCAL)
             self.map_output = self.create_publisher(PointCloud2, MAP_TOPIC, retained)
@@ -121,12 +170,18 @@ def main():
             self.pending_map = self.pending_scan = None
             self.map_published = False
             self.last_scan_stamp = -1
+            self.valid, self.valid_received = False, None
+            self.scan_header = None
+            self.last_clock_ns = None
+            self.buffer = Buffer()
+            self.listener = TransformListener(self.buffer, self)
             self.create_subscription(PointCloud2, '/map_cloud', self.receive_map, retained)
-            self.create_subscription(PointCloud2, '/registered_cloud', self.receive_scan, qos_profile_sensor_data)
+            self.create_subscription(PointCloud2, OBSTACLE_TOPIC, self.receive_scan, qos_profile_sensor_data)
+            self.create_subscription(Bool, '/localization/valid', self.receive_valid, 1)
             self.create_timer(.2, self.process)
             if self.terrain is None:
                 self.get_logger().warning('旧地图缓存没有局部地形模型，显示仍使用保存的地面平面；请重新准备导航地图以支持起伏路面。')
-            self.get_logger().info('导航显示：按本地图局部地形去地面；未知区域、地形落差及全部高度障碍保持可见。')
+            self.get_logger().info('导航显示：静态地图按保存的地形和通行区显示；实时扫描使用 Nav2 同源地面分类的全高度显示点云，按源时间戳变换。')
 
         def receive_map(self, message):
             if not self.map_published:
@@ -136,32 +191,85 @@ def main():
             stamp = message.header.stamp.sec * 10**9 + message.header.stamp.nanosec
             if stamp > self.last_scan_stamp:
                 self.last_scan_stamp = stamp
-                self.pending_scan = message  # Only newest accepted registered scan; no growing queue.
+                self.pending_scan = message  # Newest classified scan only; no growing queue.
 
-        def publish(self, message, publisher):
-            points = display_points(message, self.model, terrain=self.terrain)
+        def receive_valid(self, message):
+            self.valid, self.valid_received = bool(message.data), time.monotonic()
+            if not self.valid:
+                self.pending_scan = None
+                self.clear_scan()
+
+        def clear_scan(self):
+            # This is visualization only: never clear a costmap or claim that
+            # the physical space is empty when localization is unavailable.
+            if self.scan_header is not None:
+                header = copy.deepcopy(self.scan_header)
+                header.stamp = self.get_clock().now().to_msg()
+                self.scan_output.publish(xyz_message(header, np.empty((0, 3), dtype='<f4')))
+                self.scan_header = None
+
+        def publish(self, message, publisher, *, static=False):
+            points = display_points(message, self.model, terrain=self.terrain,
+                                    corridor=self.corridor if static else None)
             header = copy.deepcopy(message.header)
             header.frame_id = 'map'
             publisher.publish(xyz_message(header, points))
             return len(points)
 
+        def publish_scan(self, message):
+            if message.header.frame_id != 'base_link':
+                raise ValueError('Live obstacle display requires base_link input')
+            transform = self.buffer.lookup_transform('map', 'base_link', Time.from_msg(message.header.stamp))
+            t, q = transform.transform.translation, transform.transform.rotation
+            matrix = pose_matrix([t.x, t.y, t.z], [q.x, q.y, q.z, q.w])
+            points = live_display_points(message, matrix)
+            header = copy.deepcopy(message.header)
+            header.frame_id = 'map'
+            self.scan_output.publish(xyz_message(header, points))
+            self.scan_header = header
+
         def process(self):
+            now_ns = self.get_clock().now().nanoseconds
+            if self.last_clock_ns is not None and now_ns < self.last_clock_ns:
+                # A replay restart must not retain points from the previous lap.
+                self.last_scan_stamp = -1
+                self.pending_scan = None
+                self.valid, self.valid_received = False, None
+                self.clear_scan()
+            self.last_clock_ns = now_ns
             if self.pending_map is not None and not self.map_published:
                 message, self.pending_map = self.pending_map, None
                 try:
-                    count = self.publish(message, self.map_output)
+                    count = self.publish(message, self.map_output, static=True)
                     self.map_published = True
                     self.get_logger().info(f'已发布导航障碍显示图：{count} 点；原始完整地图保留供定位。')
                 except (ValueError, TypeError, KeyError, OverflowError) as error:
                     self.get_logger().warning(f'导航地图显示失败：{error}', throttle_duration_sec=5.)
             if self.pending_scan is not None:
                 message, self.pending_scan = self.pending_scan, None
+                stamp = message.header.stamp.sec * 10**9 + message.header.stamp.nanosec
+                if not scan_is_current(stamp, self.get_clock().now().nanoseconds,
+                                       self.valid, self.valid_received, time.monotonic()):
+                    self.clear_scan()
+                    return
                 try:
                     # An empty result is published too, clearing old obstacles
                     # from the display when the current scan is all ground.
-                    self.publish(message, self.scan_output)
+                    self.publish_scan(message)
+                except TransformException as error:
+                    # Retry the newest still-fresh packet when its exact TF
+                    # reaches this subscriber. Never substitute latest TF.
+                    self.pending_scan = message
+                    self.clear_scan()
+                    self.get_logger().warning(f'实时障碍显示等待源时间戳 TF：{error}', throttle_duration_sec=5.)
                 except (ValueError, TypeError, KeyError, OverflowError) as error:
                     self.get_logger().warning(f'导航实时显示失败：{error}', throttle_duration_sec=5.)
+                    self.clear_scan()
+            elif self.scan_header is not None:
+                stamp = self.scan_header.stamp.sec * 10**9 + self.scan_header.stamp.nanosec
+                if not scan_is_current(stamp, self.get_clock().now().nanoseconds,
+                                       self.valid, self.valid_received, time.monotonic()):
+                    self.clear_scan()
 
     rclpy.init()
     node = DisplayCloud()

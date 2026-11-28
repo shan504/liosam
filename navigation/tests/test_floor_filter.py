@@ -32,14 +32,23 @@ class MeasuredFloor(unittest.TestCase):
         np.testing.assert_array_equal(obstacle_mask(heights),
                                       [False, False, False, False, True, True, True, True, True, True, False, False])
 
-    def test_navigation_panels_take_the_original_mappers_outputs(self):
+    def test_environment_and_navigation_views_use_distinct_geometry_layers(self):
         layout = json.loads((Path(__file__).resolve().parents[1] / 'foxglove.json').read_text())
-        views = [panel['topics'] for name, panel in layout['configById'].items()
+        views = [panel for name, panel in layout['configById'].items()
                  if name.startswith('3D!')]
         self.assertEqual(len(views), 2)
-        for topics in views:
-            for cloud in ('/map_cloud', '/registered_cloud'):
-                self.assertTrue(topics[cloud]['visible'])
+        environment, = [view for view in views if view['publish']['type'] == 'pose_estimate']
+        navigation, = [view for view in views if view['publish']['type'] == 'pose']
+        self.assertTrue(environment['topics']['/map_cloud']['visible'])
+        self.assertFalse(environment['topics']['/navigation/display/map_obstacles']['visible'])
+        self.assertFalse(navigation['topics']['/map_cloud']['visible'])
+        self.assertTrue(navigation['topics']['/navigation/display/map_obstacles']['visible'])
+        for view in views:
+            topics = view['topics']
+            self.assertFalse(topics['/registered_cloud']['visible'])
+            self.assertTrue(topics['/navigation/display/scan_obstacles']['visible'])
+            for cloud in ('/map_cloud', '/navigation/display/map_obstacles',
+                          '/navigation/display/scan_obstacles'):
                 self.assertIsNone(topics[cloud].get('maxValue'))
             self.assertFalse(topics.get('/point_cloud2', {}).get('visible', False))
 

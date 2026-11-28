@@ -42,7 +42,7 @@
         "/map": {
           "visible": true,
           "colorMode": "map",
-          "alpha": 1.0,
+          "alpha": 0.18,
           "minColor": "#e8e7e3ff",
           "maxColor": "#14181dff",
           "unknownColor": "#46515aff",
@@ -50,8 +50,8 @@
           "frameLocked": false
         },
         "/map_cloud": {
-          "visible": false,
-          "pointSize": 1,
+          "visible": true,
+          "pointSize": 1.0,
           "colorMode": "colormap",
           "colorField": "z",
           "colorMap": "turbo",
@@ -67,12 +67,12 @@
         "/global_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
-          "alpha": 0.3
+          "alpha": 0.12
         },
         "/local_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
-          "alpha": 0.35
+          "alpha": 0.2
         },
         "/plan": {
           "visible": true,
@@ -177,20 +177,20 @@
           "maxValue": 3.5
         },
         "/navigation/display/map_obstacles": {
-          "visible": true,
+          "visible": false,
           "pointSize": 1,
           "colorMode": "colormap",
           "colorMap": "turbo",
           "colorField": "z",
           "decayTime": 0,
-          "explicitAlpha": 0.65
+          "explicitAlpha": 0.8
         },
         "/navigation/display/scan_obstacles": {
           "visible": true,
           "pointSize": 1.5,
           "colorMode": "flat",
           "flatColor": "#ffb84dcc",
-          "decayTime": 0
+          "decayTime": 1.0
         }
       },
       "layers": {},
@@ -249,7 +249,7 @@
         "/map": {
           "visible": true,
           "colorMode": "map",
-          "alpha": 1.0,
+          "alpha": 0.7,
           "minColor": "#e8e7e3ff",
           "maxColor": "#14181dff",
           "unknownColor": "#46515aff",
@@ -258,7 +258,7 @@
         },
         "/map_cloud": {
           "visible": false,
-          "pointSize": 1,
+          "pointSize": 1.0,
           "colorMode": "colormap",
           "colorField": "z",
           "colorMap": "turbo",
@@ -274,12 +274,12 @@
         "/global_costmap/costmap": {
           "visible": true,
           "colorMode": "costmap",
-          "alpha": 0.3
+          "alpha": 0.12
         },
         "/local_costmap/costmap": {
           "visible": true,
           "colorMode": "costmap",
-          "alpha": 0.35
+          "alpha": 0.2
         },
         "/plan": {
           "visible": true,
@@ -374,19 +374,18 @@
         "/navigation/display/map_obstacles": {
           "visible": true,
           "pointSize": 1,
-          "colorMode": "flat",
+          "colorMode": "colormap",
           "colorMap": "turbo",
           "colorField": "z",
           "decayTime": 0,
-          "explicitAlpha": 0.4,
-          "flatColor": "#9daab866"
+          "explicitAlpha": 0.8
         },
         "/navigation/display/scan_obstacles": {
           "visible": true,
           "pointSize": 1.5,
           "colorMode": "flat",
           "flatColor": "#ffb84dcc",
-          "decayTime": 0
+          "decayTime": 1.0
         }
       },
       "layers": {},

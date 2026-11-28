@@ -133,11 +133,11 @@ def continuous_paths(db, poses, events, ground, mount):
     return bounded
 
 
-def prepare_corridor(db, poses, frame, directory, created):
+def prepare_corridor(db, poses, frame, directory, created, build_index=True):
     """Return (document, index), or (None, None) for unmarked historical runs.
 
-    Raw scans remain in the run database. Save only one filtered PCD and compact
-    source-frame path/calibration metadata; no point-cloud terrain fit or NPZ.
+    Save compact source-frame path/calibration metadata independently of the
+    complete localization PCD; no point-cloud terrain fit or NPZ.
     """
     document = load_corridor_document(db, frame, poses)
     if document is None:
@@ -168,7 +168,7 @@ def prepare_corridor(db, poses, frame, directory, created):
                        body_height_above_ground=body_height, body_from_lidar=mount.tolist())
     paths = continuous_paths(db, poses, events, ground, mount)
     document = make_document(frame, events, paths=paths, calibration=calibration)
-    index = SourceFrameCorridor(ground, document)
+    index = SourceFrameCorridor(ground, document) if build_index else None
     print(f'正在沿优化轨迹连接 {len(events):,} 段通行区（{len(paths):,} 条连续记录）；'
-          '直接清理点云，不执行地形拟合。', flush=True)
+          '仅保存导航通行带，保留完整定位点云，不执行地形拟合。', flush=True)
     return document, index

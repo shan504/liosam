@@ -236,6 +236,12 @@ def trace_archive(version, dest, manifest, files):
     source = manifest['dense']['frame_id'].strip('/')
     ground, mount, sensor = transforms(version, source)
     survey, _ = survey_contract(version, manifest)
+    geometry_kind = manifest['dense'].get('pc_geometry',
+        'corridor_cleared_legacy' if survey is not None else 'full_registered_returns')
+    if geometry_kind != 'full_registered_returns':
+        print('此旧版本的定位 PCD 已清理通行带，缺失的匹配几何不能由栅格恢复。'
+              '若原始运行归档仍在，执行 python3 ~/go2-detail/noetic/restore_map_geometry.py '
+              + str(manifest.get('name', version.name)) + ' 生成保留完整几何的新版本。', file=sys.stderr, flush=True)
     raw = point_array(version / files[0])
     if len(raw) != manifest['dense']['points'] or len(raw) < 100:
         raise ValueError('地图点数不足或与 manifest 不符')
@@ -362,6 +368,7 @@ def trace_archive(version, dest, manifest, files):
     report = clean_directory(dest, free_support=lambda xy: observed_free_support(grid, xy))
     name = map_name(manifest.get('name', Path(files[0]).stem))
     metadata = dict(frame_id='map', map_type='lio_sam', point_count=retained, source_point_count=n,
+                    pc_geometry=geometry_kind,
                     ground_aligned=True,
                     body_height_above_ground=body_height, ground_model=model,
                     terrain_model=terrain_metadata,

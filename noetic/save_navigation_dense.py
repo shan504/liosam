@@ -20,8 +20,12 @@ def pcd_header(points):
     ).encode('ascii')
 
 
-def export_dense(database, output):
-    """Write one binary XYZI PCD, plus its scan index and optimized keyframe poses."""
+def export_dense(database, output, snapshot=None):
+    """Write one full XYZI localization/environment cloud and a separate road policy.
+
+    ``snapshot`` is an optional validated SavedSnapshot from an existing bundle;
+    it selects that bundle's exact scan list and saved optimized anchor poses.
+    """
     database, output = Path(database), Path(output)
     with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
         # Pin one committed view of the live WAL. Incoming scans and loop updates
@@ -37,10 +41,18 @@ def export_dense(database, output):
         if size % 16 or source_points > 0xffffffff:
             raise ValueError('稠密归档点数或 XYZI 格式不适用于单个 PCD 文件')
         poses = {stamp: json.loads(pose) for stamp, pose in db.execute('SELECT stamp,pose FROM poses ORDER BY stamp')}
+        if snapshot is not None:
+            snapshot.validate(db, frame[0])
+            poses = snapshot.poses
+            count, source_points, first, last = snapshot.scan_count, snapshot.source_points, snapshot.first, snapshot.last
         # The caller creates a private staging directory. Never overwrite a previous map.
         created = []
         try:
-            corridor, selection = prepare_corridor(db, poses, frame[0], output.parent, created)
+            if snapshot is None:
+                corridor, _ = prepare_corridor(db, poses, frame[0], output.parent, created,
+                                                build_index=False)
+            else:
+                corridor = snapshot.corridor
             header = pcd_header(0)
             with ExitStack() as files:
                 def new_file(path, mode, **kwargs):
@@ -59,24 +71,24 @@ def export_dense(database, output):
                 handle.write(header)
                 point_offset = source_seen = 0
                 last_progress = time.monotonic()
-                for scan_number, (stamp, anchor, world) in enumerate(world_scans(db, poses), 1):
+                scans = world_scans(db, poses) if snapshot is None else snapshot.world_scans(db)
+                for scan_number, (stamp, anchor, world) in enumerate(scans, 1):
                     source_seen += len(world)
-                    # Apply the complete corrected corridor to every historical
-                    # scan, including points first seen outside the near strip.
-                    if corridor is not None and corridor['poses']:
-                        world = world[~selection.contains(world)]
+                    # A survey clearance is a navigation policy, not evidence
+                    # that measured geometry disappeared. GICP and the 3-D view
+                    # must retain the returns seen by the incoming scan.
                     if len(world):
                         handle.write(memoryview(world).cast('B'))
                     index.writerow((stamp, anchor, point_offset, len(world)))
                     point_offset += len(world)
                     now = time.monotonic()
                     if now-last_progress >= 5. or scan_number == count:
-                        print(f'写入地图：{scan_number:,}/{count:,} 帧，保留 {point_offset:,} 点，'
-                              f'清理 {source_seen-point_offset:,} 点。', flush=True)
+                        print(f'写入完整定位地图：{scan_number:,}/{count:,} 帧，'
+                              f'{point_offset:,} 点；通行带仅用于导航栅格。', flush=True)
                         last_progress = now
                 points, size = point_offset, point_offset*16
                 if not points:
-                    raise ValueError('全部点云都落在人工清理范围内，缺少用于定位的地图回波；未发布地图')
+                    raise ValueError('地图没有有效配准回波；未发布地图')
                 if source_seen != source_points or handle.tell() != len(header) + size:
                     raise OSError('导出 PCD 的有效载荷字节数与归档不一致')
                 # No count pass, spool copy, or second permanent cloud. The
@@ -97,12 +109,13 @@ def export_dense(database, output):
                 path.unlink()
             raise
     result = dict(frame_id=frame[0], scans=count, points=points, anchors=len(poses),
-                  first_stamp_ns=first, last_stamp_ns=last, payload_bytes=size)
+                  first_stamp_ns=first, last_stamp_ns=last, payload_bytes=size,
+                  pc_geometry='full_registered_returns')
     if corridor is not None:
         result.update(surveyed_corridor='surveyed_corridor.json', source_points=source_points,
                       cleared_points=source_points-points, corridor_events=len(corridor['poses']),
                       corridor_paths=len(corridor.get('paths', [])),
                       corridor_splits=max(0, len(corridor.get('paths', []))-1),
                       corridor_links=sum(max(0, len(path)-1) for path in corridor.get('paths', [])),
-                      terrain_fitting=False)
+                      terrain_fitting=False, corridor_application='navigation_grid_only')
     return result

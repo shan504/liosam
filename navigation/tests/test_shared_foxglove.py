@@ -49,21 +49,36 @@ class SharedFoxgloveLayout(unittest.TestCase):
                 self.assertTrue(view["cameraState"]["perspective"])
                 self.assertGreater(view["cameraState"]["phi"], 0)
                 self.assertLess(view["cameraState"]["phi"], 90)
-                for topic in (cloud_topic, "/map", "/navigation/display/map_obstacles",
-                              "/navigation/display/scan_obstacles",
+                for topic in (cloud_topic, "/map", "/navigation/display/scan_obstacles",
                               "/go2_visual/live/model_mesh"):
                     self.assertTrue(view["topics"][topic]["visible"], topic)
-                for topic in ("/map_cloud", "/registered_cloud"):
-                    self.assertFalse(view["topics"][topic]["visible"], topic)
+                self.assertFalse(view["topics"]["/registered_cloud"]["visible"])
+
+    def test_environment_view_keeps_full_3d_geometry_above_subtle_map(self):
+        view, = [view for view in self.panels["3D"] if view["publish"]["type"] == "pose_estimate"]
+        topics = view["topics"]
+        self.assertTrue(topics["/map_cloud"]["visible"])
+        self.assertEqual(topics["/map_cloud"]["colorMode"], "colormap")
+        self.assertLessEqual(topics["/map"]["alpha"], .2)
+        for topic in ("/navigation/display/map_obstacles", "/global_costmap/costmap",
+                      "/local_costmap/costmap"):
+            self.assertFalse(topics[topic]["visible"], topic)
 
     def test_goal_view_exposes_roads_costmaps_and_both_paths(self):
         view, = [view for view in self.panels["3D"] if view["publish"]["type"] == "pose"]
         topics = view["topics"]
-        self.assertEqual(topics["/map"]["alpha"], 1.)
+        self.assertGreaterEqual(topics["/map"]["alpha"], .6)
+        self.assertLess(topics["/map"]["alpha"], 1.)
+        self.assertTrue(topics["/navigation/display/map_obstacles"]["visible"])
+        self.assertEqual(topics["/navigation/display/map_obstacles"]["colorMode"], "colormap")
+        self.assertFalse(topics["/map_cloud"]["visible"])
         self.assertNotEqual(topics["/map"]["minColor"], topics["/map"]["unknownColor"])
         for topic in ("/global_costmap/costmap", "/local_costmap/costmap", "/plan", "/local_plan"):
             self.assertTrue(topics[topic]["visible"], topic)
         self.assertNotEqual(topics["/plan"]["gradient"], topics["/local_plan"]["gradient"])
+        for topic in ("/global_costmap/costmap", "/local_costmap/costmap"):
+            self.assertLessEqual(topics[topic]["alpha"], .2)
+        self.assertGreater(topics["/navigation/display/scan_obstacles"]["decayTime"], 0.)
 
     def test_camera_and_status_panels(self):
         image, = self.panels["Image"]

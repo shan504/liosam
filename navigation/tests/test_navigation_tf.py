@@ -170,7 +170,7 @@ class NavigationTF(unittest.TestCase):
         self.assertIsNone(self.node.buffer.latest)
         self.node.broadcaster.sendTransform.assert_not_called()
 
-    def test_invalid_localization_and_exhausted_budget_cannot_renew_tf(self):
+    def test_invalid_localization_never_renews_map_tf_but_keeps_measured_body_projection(self):
         for fault in ['no_match', 'match_timeout', 'cloud_timeout', 'budget']:
             with self.subTest(fault=fault):
                 self.reset_node()
@@ -181,8 +181,23 @@ class NavigationTF(unittest.TestCase):
                 if fault == 'match_timeout': n.last_accepted = 496.
                 if fault == 'cloud_timeout': n.latest = (*n.latest[:2], 498.)
                 if fault == 'budget': body[0, 3] = 2.
-                n.receive_navigation_odometry(odometry(self.now-10_000_000, body))
-                n.broadcaster.sendTransform.assert_not_called()
+                accepted = n.last_accepted
+                correction = n.correction.copy()
+                message = odometry(self.now-10_000_000, body)
+                n.receive_navigation_odometry(message)
+                if fault == 'no_match':
+                    n.broadcaster.sendTransform.assert_not_called()
+                else:
+                    n.broadcaster.sendTransform.assert_called_once()
+                    edges = n.broadcaster.sendTransform.call_args.args[0]
+                    self.assertEqual([(e.header.frame_id, e.child_frame_id) for e in edges],
+                                     [('base_link', 'base_footprint')])
+                    self.assertEqual(edges[0].header.stamp, message.header.stamp)
+                    np.testing.assert_allclose(correction@body@matrix(edges[0].transform),
+                                               planar_pose(correction@body), atol=1e-12)
+                self.assertEqual(n.last_accepted, accepted)
+                np.testing.assert_array_equal(n.correction, correction)
+                self.assertFalse(n.localization_readiness()[0])
 
     def test_decimates_repeats_and_never_restamps_old_measurements(self):
         n = self.node

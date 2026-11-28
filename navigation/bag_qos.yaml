@@ -1,0 +1,24 @@
+/point_cloud2:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 50
+/odom:
+  reliability: reliable
+  durability: volatile
+  history: keep_last
+  depth: 200
+/utlidar/robot_odom:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 200
+/tf_static:
+  reliability: reliable
+  durability: transient_local
+  history: keep_all
+/tf:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 200

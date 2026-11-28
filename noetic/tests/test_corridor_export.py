@@ -86,7 +86,7 @@ def independently_inside(points, body):
 
 
 class CorridorExport(unittest.TestCase):
-    def test_two_maps_filter_single_pass_without_terrain_and_preserve_index(self):
+    def test_two_maps_preserve_full_geometry_single_pass_without_terrain_and_index(self):
         for name,yaw,shift in [('east',0.,(0.,0.,0.)),('west',.73,(-23.,41.,.4))]:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
                 database,stage,db,poses,bodies,raw=fixture(tmp,name,yaw,shift)
@@ -101,18 +101,20 @@ class CorridorExport(unittest.TestCase):
                 document=read_document(stage/'surveyed_corridor.json',expected_frame='odom')
                 self.assertEqual(len(document['poses']),1)
                 np.testing.assert_allclose(document['poses'][0]['body_pose'],bodies[1],atol=1e-7)
-                expected=[scan[~independently_inside(scan,bodies[1])] for scan in raw]
+                expected=raw
                 actual=point_array(stage/(name+'.pcd'))
                 np.testing.assert_allclose(actual,np.vstack(expected),atol=4e-6)
                 self.assertEqual(result['points'],sum(map(len,expected)))
                 self.assertEqual(result['source_points'],sum(map(len,raw)))
-                self.assertEqual(result['cleared_points'],sum(map(len,raw))-len(actual))
+                self.assertEqual(result['cleared_points'],0)
+                self.assertEqual(result['pc_geometry'],'full_registered_returns')
+                self.assertEqual(result['corridor_application'],'navigation_grid_only')
                 self.assertEqual(result['payload_bytes'],len(actual)*16)
                 self.assertEqual(result['scans'],3)
                 with (stage/'scans.csv').open() as stream:
                     rows=list(csv.DictReader(stream))
-                self.assertEqual([int(row['point_count']) for row in rows],[len(expected[0]),0,len(expected[2])])
-                self.assertEqual([int(row['first_point_index']) for row in rows],[0,len(expected[0]),len(expected[0])])
+                self.assertEqual([int(row['point_count']) for row in rows],[len(scan) for scan in expected])
+                self.assertEqual([int(row['first_point_index']) for row in rows],[0,len(expected[0]),len(expected[0])+len(expected[1])])
                 self.assertEqual(db.execute('SELECT stamp,anchor,points FROM scans ORDER BY stamp').fetchall(),before)
                 self.assertEqual(document['version'],2)
                 self.assertNotIn('terrain',document)
@@ -155,12 +157,12 @@ class CorridorExport(unittest.TestCase):
             clouds=[]
             for scan in raw:
                 changed=scan.copy();changed[:,:3]=apply(scan,correction)
-                clouds.append(changed[~independently_inside(changed,correction@bodies[1])])
+                clouds.append(changed)
             np.testing.assert_allclose(point_array(stage/'lane.pcd'),np.vstack(clouds),atol=3e-6)
-            self.assertGreater(result['cleared_points'],0)
+            self.assertEqual(result['cleared_points'],0)
             db.close()
 
-    def test_tilted_lio_world_uses_horizontal_body_strip_at_every_height(self):
+    def test_tilted_lio_world_preserves_every_height_for_registration(self):
         with tempfile.TemporaryDirectory() as tmp:
             database,stage,db,poses,bodies,raw=fixture(tmp,yaw=.7,shift=(5.,-3.,1.),pitch=math.pi/6)
             result=export_dense(database,stage/'lane.pcd')
@@ -172,17 +174,17 @@ class CorridorExport(unittest.TestCase):
             for scan in raw:
                 inside=independently_inside(apply(scan,ground),ground_body)
                 wrong_source_removed+=np.count_nonzero(independently_inside(scan,bodies[1])!=inside)
-                expected.append(scan[~inside])
+                expected.append(scan)
             self.assertGreater(wrong_source_removed,0)
             np.testing.assert_allclose(point_array(stage/'lane.pcd'),np.vstack(expected),atol=4e-6)
             self.assertEqual(result['points'],sum(map(len,expected)))
-            # High/low returns over the same confirmed strip are cleared; a
-            # high return outside it remains despite the source-world tilt.
+            # Every measured return remains available to localization, including
+            # high/low returns inside the navigation-only clearance strip.
             original_intensities=set(np.vstack(raw)[:,3].tolist())
             kept_intensities=set(point_array(stage/'lane.pcd')[:,3].tolist())
             for intensity in (5800.,5801.):
                 self.assertIn(intensity,original_intensities)
-                self.assertNotIn(intensity,kept_intensities)
+                self.assertIn(intensity,kept_intensities)
             self.assertIn(5802.,kept_intensities)
             db.close()
 
@@ -214,13 +216,13 @@ class CorridorExport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             database,stage,db,poses,bodies,raw=fixture(tmp)
             original=save_navigation_dense.prepare_corridor
-            def mutate_writer(reader,*args):
+            def mutate_writer(reader,*args,**kwargs):
                 # export_dense has already read snapshot metadata and poses.
                 db.execute('UPDATE poses SET pose=? WHERE stamp=2000',
                     (json.dumps(values(rigid([100,0,.37],[0,0,0,1]))),))
                 db.execute('DELETE FROM corridor_events')
                 db.commit()
-                return original(reader,*args)
+                return original(reader,*args,**kwargs)
             with patch.object(save_navigation_dense,'prepare_corridor',side_effect=mutate_writer):
                 result=export_dense(database,stage/'lane.pcd')
             self.assertEqual(result['corridor_events'],1)
@@ -256,10 +258,13 @@ class CorridorExport(unittest.TestCase):
             self.assertEqual([event['stamp_ns'] for event in doc['paths'][0]],
                              [(i+1)*1_000_000_000 for i in range(len(trace))])
             actual=point_array(stage/'lane.pcd')
-            # Three levels of ghost returns on each measured road leg vanish;
-            # the U-shaped interior is not cleared by a start/end shortcut.
-            self.assertEqual(set(actual[:,3]),{20.,21.})
-            self.assertEqual(result['cleared_points'],3*len(trace))
+            # Navigation receives the continuous route metadata while the sole
+            # PCD retains every measured return for GICP/environment display.
+            self.assertEqual(set(actual[:,3]),{10.,11.,12.,20.,21.})
+            self.assertEqual(result['cleared_points'],0)
+            from surveyed_corridor import index_from_document
+            corridor=index_from_document(doc,np.eye(4))
+            np.testing.assert_array_equal(corridor.contains(cloud),[True,True,True,False,False])
             self.assertFalse((stage/'survey_terrain.npz').exists())
             db.close()
 

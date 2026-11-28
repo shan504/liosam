@@ -95,6 +95,7 @@ class LiveTerrainCallbacks(unittest.TestCase):
         mods['rclpy.qos'].qos_profile_sensor_data='sensor_qos'
         mods['sensor_msgs.msg'].PointCloud2=object
         mods['std_msgs.msg'].Bool=object
+        mods['std_msgs.msg'].String=NS
         mods['tf2_ros'].Buffer=Buffer
         mods['tf2_ros'].TransformListener=lambda buffer,node:None
         mods['tf2_ros'].TransformException=TFError
@@ -188,6 +189,7 @@ class LiveTerrainCallbacks(unittest.TestCase):
             current.ready=True
             node.process()
             self.assertEqual(len(pubs['/navigation/obstacle_cloud'].messages),1)
+
             node.receive(cloud)  # duplicate source stamp
             node.receive(message([[1,0,1]],frame='odom',stamp=(99,950000000)))
             node.receive(message([[1,0,1]],frame='base_link',stamp=(98,0)))
@@ -198,6 +200,48 @@ class LiveTerrainCallbacks(unittest.TestCase):
             node.process()
             self.assertFalse(node.pending)
             self.assertEqual(len(pubs['/navigation/obstacle_cloud'].messages),1)
+
+    def test_current_measured_slope_outside_saved_strip_and_diagnostics(self):
+        from terrain import TerrainModel
+        with tempfile.TemporaryDirectory() as temp:
+            for name,shift,slope in [('yard',np.array([0.,0.,0.]),0.),
+                                     ('farm',np.array([20.,-4.,1.4]),.12)]:
+                with self.subTest(map=name):
+                    directory=Path(temp)/name
+                    directory.mkdir()
+                    (directory/'metadata.yaml').write_text(json.dumps(dict(
+                        ground_model=dict(plane=[0,0,1,0]),body_height_above_ground=.327)))
+                    # Deliberately empty/narrow saved support: this caused floor
+                    # returns outside operator-cleared strips to be obstacles.
+                    saved=TerrainModel([],[])
+                    _,node,pubs,_,_,current=self.fake_runtime(directory,saved)
+                    current.matrix[:3,3]=shift+[0,0,.327]
+                    xx,yy=np.meshgrid(np.arange(-2.37,2.4,.06),np.arange(-2.37,2.4,.06))
+                    floor=np.column_stack((xx.ravel(),yy.ravel(),slope*xx.ravel()))+shift
+                    obstacle=shift+[.7,.1,slope*.7+.3]
+                    high=shift+[.7,.1,slope*.7+8.]
+                    world=np.vstack((floor,obstacle,high))
+                    body=transform_points(world,np.linalg.inv(current.matrix))
+                    node.on_valid(NS(data=True))
+                    node.receive(message(body,frame='base_link',stamp=(99,900000000)))
+                    node.process()
+                    result=pubs['/navigation/obstacle_cloud'].messages[-1].points
+                    self.assertLess(len(result),len(floor)*.1)
+                    self.assertTrue(np.min(np.linalg.norm(result-body[-2],axis=1))<1e-6)
+                    self.assertTrue(np.min(np.linalg.norm(result-body[-1],axis=1))>1.)
+                    visual=pubs['/navigation/measured_scan_obstacles'].messages[-1]
+                    self.assertTrue(np.min(np.linalg.norm(visual.points-body[-1],axis=1))<1e-6)
+                    self.assertEqual(visual.header.frame_id,'base_link')
+                    self.assertEqual(visual.header.stamp,NS(sec=99,nanosec=900000000))
+                    node.report()
+                    status=json.loads(pubs['/navigation/obstacle_status'].messages[-1].data)
+                    self.assertEqual(status['state'],'publishing_current_obstacles')
+                    self.assertGreater(status['measured_ground_points'],len(floor)*.9)
+                    self.assertGreaterEqual(status['front_obstacle_points'],1)
+                    self.assertEqual(status['source_stamp_ns'],99_900_000_000)
+                    node.on_valid(NS(data=False))
+                    node.report()
+                    self.assertFalse(json.loads(pubs['/navigation/obstacle_status'].messages[-1].data)['localization_valid'])
 
     def test_display_keeps_all_heights_unknown_and_drops_while_removing_uphill_ground(self):
         import display_cloud

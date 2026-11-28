@@ -52,11 +52,12 @@ class ScanMatchUnavailable(ValueError):
     """Discard this scan without renewing the previous accepted match."""
 
 
-def require_match(result, prefix=''):
+def require_match(result, prefix='', diagnostics=None):
     if not result.accepted:
         error = (ScanMatchUnavailable if result.reason in
                  ('too few points', 'overlap/residual rejected') else ValueError)
-        raise error(f'{prefix}{result.reason}: fitness={result.fitness:.3f} rmse={result.rmse:.3f}')
+        detail = '' if not diagnostics else '; '+diagnostics
+        raise error(f'{prefix}{result.reason}: fitness={result.fitness:.3f} rmse={result.rmse:.3f}'+detail)
 
 
 class Mapper(Node):
@@ -703,7 +704,11 @@ class Mapper(Node):
                                                       self.p['localization_initial_max_rotation_degrees']),
                                iterations=self.p['localization_fine_iterations'], innovation_guess=guess,
                                relative_fitness=1e-4, relative_rmse=1e-4)
-                require_match(result, 'Fine GICP ')
+                require_match(result, 'Fine GICP ', diagnostics=(
+                    f'limits fitness>={self.p["localization_min_fitness"]:.3f} '
+                    f'rmse<={min(self.p["max_rmse"], self.p["localization_max_rmse"]):.3f}m; '
+                    f'source_points={registration_count} target_points={target_count}; '
+                    f'map_geometry={getattr(self, "map_metadata", {}).get("pc_geometry", "legacy/unspecified")}'))
                 matched,fitness,rmse = result.transform,result.fitness,result.rmse
             new_correction = matched@np.linalg.inv(odom_base)
             # A standing robot's accepted scan-to-map noise must not move
@@ -1001,14 +1006,26 @@ class Mapper(Node):
             else:
                 valid = (self.seeded and self.last_accepted is not None and
                          0 <= time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
-            if not valid:
+            # The body projection follows current measured odometry even
+            # while the last map correction is untrusted. Stopping this edge
+            # as well as map->odom pins base_footprint to an old timestamp;
+            # after the TF cache expires even odom->base_footprint fails.
+            # Keep map->odom stopped and /localization/valid false: a fresh
+            # body projection is not a fresh localization or motion grant.
+            project_body = (self.p['mode'] == 'localization' and self.seeded and
+                            self.last_accepted is not None and
+                            -0.1 <= age <= self.p['localization_odom_timeout'])
+            if not valid and not project_body:
                 return
-            transform = TransformStamped()
-            transform.header.stamp = odom.header.stamp
-            transform.header.frame_id,transform.child_frame_id = 'map','odom'
-            t,q = self.correction[:3,3],quaternion_from_matrix(self.correction)
-            transform.transform.translation.x,transform.transform.translation.y,transform.transform.translation.z = map(float,t)
-            transform.transform.rotation.x,transform.transform.rotation.y,transform.transform.rotation.z,transform.transform.rotation.w = map(float,q)
+            transforms = []
+            if valid:
+                transform = TransformStamped()
+                transform.header.stamp = odom.header.stamp
+                transform.header.frame_id,transform.child_frame_id = 'map','odom'
+                t,q = self.correction[:3,3],quaternion_from_matrix(self.correction)
+                transform.transform.translation.x,transform.transform.translation.y,transform.transform.translation.z = map(float,t)
+                transform.transform.rotation.x,transform.transform.rotation.y,transform.transform.rotation.z,transform.transform.rotation.w = map(float,q)
+                transforms.append(transform)
             # Keep true 6D body/point-cloud poses. Nav2 gets a separate 2D
             # footprint on the map grid, with measured XY and yaw preserved.
             body = self.correction@transform_matrix(odom.transform)
@@ -1019,7 +1036,8 @@ class Mapper(Node):
             t,q = body_footprint[:3,3],quaternion_from_matrix(body_footprint)
             footprint.transform.translation.x,footprint.transform.translation.y,footprint.transform.translation.z = map(float,t)
             footprint.transform.rotation.x,footprint.transform.rotation.y,footprint.transform.rotation.z,footprint.transform.rotation.w = map(float,q)
-            self.broadcaster.sendTransform([transform,footprint])
+            transforms.append(footprint)
+            self.broadcaster.sendTransform(transforms)
             self.last_tf_stamp = stamp.nanoseconds
 
     def publish_map(self):

@@ -61,7 +61,7 @@ def make_recording(root, name, *, tilted=False, marked=True, events=True):
     for x, y in [(.4, -.075), (3.4, -.075), (2., -.075), (.4, .775)]:
         bxy = (np.indices((7, 7)).reshape(2, -1).T + .5) * .025 + [x, y]
         blocks.append(np.column_stack((bxy, .04 * bxy[:, 0] + .55)))
-    # The gap obstacle and even high returns must disappear at save.
+    # Preserve geometry for GICP; only the derived static grid clears the lane.
     tall = np.array([[.6, .1, 8.], [2.2, -.1, 15.], [3.6, -.1, 11.], [4.6, .1, 13.]])
     road = np.vstack((floor, *blocks, tall))
     intensities = np.arange(1, len(road) + 1, dtype=np.float32)
@@ -228,7 +228,7 @@ class SurveyedCorridorMapIntegration(unittest.TestCase):
             actual = point_array(record['version']/manifest['map_file'])
             lane_points = apply(apply(actual, np.linalg.inv(record['saved_from_map'])),
                                 np.linalg.inv(record['lane']))
-            self.assertFalse(np.any(np.linalg.norm(lane_points[:, :2]-probes[0, :2], axis=1) < .04))
+            self.assertTrue(np.any(np.linalg.norm(lane_points[:, :2]-probes[0, :2], axis=1) < .04))
             self.assertTrue(np.any(np.linalg.norm(lane_points[:, :2]-probes[1, :2], axis=1) < .04))
             doc = json.loads((record['version']/'surveyed_corridor.json').read_text())
             self.assertEqual(len(doc['paths']), 1)
@@ -238,7 +238,7 @@ class SurveyedCorridorMapIntegration(unittest.TestCase):
             xy_probes = apply(probes, record['lane'])[:, :2]
             np.testing.assert_array_equal(grid_labels(bundle, xy_probes), [254, 0])
 
-    def test_two_maps_clear_historical_gaps_without_cloud_terrain_work(self):
+    def test_two_maps_keep_gicp_geometry_and_clear_navigation_gaps_without_terrain_work(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for name, tilted in [('east_farm', False), ('unrelated_hill', True)]:
@@ -249,22 +249,17 @@ class SurveyedCorridorMapIntegration(unittest.TestCase):
                     version = record['version']
                     original = digest_tree(version)
                     actual = np.asarray(point_array(version / manifest['map_file']))
-                    expected = []
-                    for _, _, source, road in record['chunks']:
-                        # Straight fixture oracle independent of swept-polygon implementation.
-                        inside = (road[:, 0] >= .12) & (road[:, 0] <= 4.12) & (abs(road[:, 1]) <= .5)
-                        expected.append(source[~inside])
-                    expected = np.vstack(expected)
+                    expected = np.vstack([source for _, _, source, _ in record['chunks']])
                     self.assertEqual(len(actual), len(expected))
                     np.testing.assert_allclose(actual[:, :3], expected[:, :3], atol=2e-6, rtol=0)
                     np.testing.assert_array_equal(actual[:, 3], expected[:, 3])
-                    self.assertEqual(manifest['dense']['cleared_points'],
-                                     sum(len(chunk[2]) for chunk in record['chunks']) - len(expected))
+                    self.assertEqual(manifest['dense']['cleared_points'], 0)
+                    self.assertEqual(manifest['dense']['pc_geometry'], 'full_registered_returns')
                     with (version / 'scans.csv').open() as stream:
                         rows = list(csv.DictReader(stream))
                     counts = [int(row['point_count']) for row in rows]
                     self.assertEqual([int(row['point_count']) for row in rows
-                                      if int(row['stamp_ns']) in record['event_stamps']], [0, 0])
+                                      if int(row['stamp_ns']) in record['event_stamps']], [2, 2])
                     np.testing.assert_array_equal([int(row['first_point_index']) for row in rows],
                                                   np.cumsum([0] + counts[:-1]))
                     document = json.loads((version / 'surveyed_corridor.json').read_text())
@@ -285,6 +280,13 @@ class SurveyedCorridorMapIntegration(unittest.TestCase):
                     meta = yaml.safe_load((bundle / 'metadata.yaml').read_text())
                     self.assertEqual(meta['surveyed_corridor']['events'], 2)
                     self.assertGreater(meta['surveyed_corridor']['free_cells'], 0)
+                    self.assertEqual(meta['pc_geometry'], 'full_registered_returns')
+                    # Derived GICP map still contains tall geometry inside the
+                    # same road whose static grid is free. No flattening or Z clipping.
+                    localized = point_array(bundle/'map.pcd')
+                    lane_geometry = apply(localized, np.linalg.inv(record['lane']))
+                    self.assertTrue(np.any((lane_geometry[:, 2] > 14.) &
+                                           (np.abs(lane_geometry[:, 1]) < .5)))
                     reference = load_terrain(bundle, meta)
                     heights, supported = reference.height_at(probes)
                     self.assertTrue(supported.all())
