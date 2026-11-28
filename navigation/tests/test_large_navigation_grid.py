@@ -142,7 +142,9 @@ class LargeNavigationGrid(unittest.TestCase):
                 prepared = port.prepare(source, root/'cache')
             self.assertTrue((prepared/'nav.pgm').is_file())
             self.assertEqual(output.getvalue(), '')
-            for stage in ('原始回波', '扫描帧', '定位体素', '栅格', '去除导航栅格孤立噪点'):
+            for stage in ('原始回波', '核对原始扫描索引', '起点地面基准过滤 0–15cm',
+                          '转换全部原始回波并聚合定位体素', '写入定位地图体素',
+                          '导出完整导航栅格', '去除导航栅格孤立噪点'):
                 self.assertIn(stage, progress.getvalue())
 
     def test_historical_converter_has_no_separate_area_ceiling(self):

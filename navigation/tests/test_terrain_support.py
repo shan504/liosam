@@ -46,6 +46,28 @@ def labels(directory, xy):
 
 
 class FineTerrainSupport(unittest.TestCase):
+    def test_empty_obstacle_band_keeps_observed_ground_without_inventing_free(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Exactly 15 cm is removed, including its float32 representation.
+            ground = np.array([[.025, .025, 0.], [.075, .025, .15],
+                               [.125, .025, .05]], dtype=np.float32)
+            grid = ObservedGrid(.05)
+            grid.free.add((20, 20))  # Old ray evidence must not survive.
+            export_grid([ground, ground], grid, root/'floor_only',
+                        dict(obstacle_min_height=.15, obstacle_max_height=1.5),
+                        dict(plane=[0., 0., 1., 0.]))
+            np.testing.assert_array_equal(labels(root/'floor_only', ground[:, :2]), 254)
+            self.assertNotIn((20, 20), grid.free)
+            self.assertEqual(len(grid.free), 3)
+            # Returns outside the height band and singleton endpoints provide
+            # no free evidence; a cached empty world must not be manufactured.
+            empty = ObservedGrid(.05)
+            with self.assertRaisesRegex(ValueError, 'observed-free'):
+                export_grid([np.array([[0., 0., 2.]])], empty, root/'no_ground',
+                            dict(obstacle_min_height=.15, obstacle_max_height=1.5),
+                            dict(plane=[0., 0., 1., 0.]))
+
     def test_ray_through_partial_terrain_cell_does_not_prove_floor(self):
         with tempfile.TemporaryDirectory() as tmp:
             for name, offset in [('near_lane', (0., 0.)), ('other_lane', (8., -4.))]:
@@ -58,7 +80,7 @@ class FineTerrainSupport(unittest.TestCase):
                     grid.free.add(tuple(np.floor(hole/.05).astype(int)))
                     output = Path(tmp) / name
                     export_grid([floor, np.vstack((floor, obstacles))], grid, output,
-                                dict(obstacle_min_height=.10, obstacle_max_height=1.5),
+                                dict(obstacle_min_height=.15, obstacle_max_height=1.5),
                                 dict(plane=[0., 0., 1., 0.], _terrain=terrain))
                     self.assertFalse(observed_free_support(grid, hole[None, :])[0])
                     np.testing.assert_array_equal(labels(output, hole[None, :]), 205)
@@ -72,7 +94,7 @@ class FineTerrainSupport(unittest.TestCase):
             isolated = np.array([[*hole, .30]])
             grid = ObservedGrid(.05)
             export_grid([floor, np.vstack((floor, obstacles, isolated))], grid, output,
-                        dict(obstacle_min_height=.10, obstacle_max_height=1.5),
+                        dict(obstacle_min_height=.15, obstacle_max_height=1.5),
                         dict(plane=[0., 0., 1., 0.], _terrain=terrain))
             np.testing.assert_array_equal(labels(output, hole[None, :]), 0)
             report = clean_directory(

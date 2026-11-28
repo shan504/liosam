@@ -1,4 +1,4 @@
-"""Sloping farm lanes retain ground, obstacles, gaps and full 3D localization XYZ."""
+"""Every map uses the initial plane, preserving full 3D localization XYZ."""
 from collections import Counter
 import csv
 import hashlib
@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import yaml
@@ -15,7 +16,6 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from prepare_go2_map import prepare
 from prepare_map import apply, point_array, quaternion, rigid
-from terrain import load_terrain
 
 
 def elevation(x, rise):
@@ -78,7 +78,7 @@ def make_lane(root, name, offset, rise, tilt):
 
 
 class SlopingMapIntegration(unittest.TestCase):
-    def test_two_graded_routes_cached_grid_and_prior(self):
+    def test_two_saved_planes_apply_fixed_band_without_terrain_and_keep_prior(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name, offset, rise, tilt in [('east_lane',0.,1.6,.12), ('west_lane',-20.,1.3,-.08)]:
@@ -86,9 +86,15 @@ class SlopingMapIntegration(unittest.TestCase):
                     source, samples = make_lane(root,name,offset,rise,tilt)
                     pcd = source / (name+'.pcd')
                     original = hashlib.sha256(pcd.read_bytes()).digest()
-                    bundle = prepare(source,root/'cache')
+                    with patch('terrain.build_terrain', side_effect=AssertionError('terrain fitting disabled')), \
+                         patch('corridor_reference.trajectory_reference', side_effect=AssertionError('trajectory fitting disabled')):
+                        bundle = prepare(source,root/'cache')
                     meta = yaml.safe_load((bundle/'metadata.yaml').read_text())
-                    terrain = load_terrain(bundle,meta)
+                    self.assertEqual(meta['ground_filter_mode'], 'initial_plane')
+                    self.assertEqual(meta['floor_rejection_height'], .15)
+                    self.assertNotIn('terrain_model', meta)
+                    self.assertFalse((bundle/'terrain.npz').exists())
+                    self.assertFalse((bundle/'road_reference.npz').exists())
                     nav = yaml.safe_load((bundle/'nav.yaml').read_text())
                     with (bundle/nav['image']).open('rb') as pgm:
                         self.assertEqual(pgm.readline(), b'P5\n')
@@ -98,24 +104,24 @@ class SlopingMapIntegration(unittest.TestCase):
                     def labels(points):
                         col,row = np.floor((points - nav['origin'][:2])/nav['resolution']).astype(int).T
                         return image[row,col]
-                    # Slope ascent, summit and descent are all continuous navigable ground.
+                    # The explicit requested policy uses the initial plane at z=0,
+                    # not the later road elevation: low returns are removed and
+                    # road rises above 15 cm remain obstacles within the height band.
                     road = np.column_stack((offset + np.arange(.025,16.,.05), np.full(320,-.175)))
-                    z,supported = terrain.height_at(road)
-                    self.assertTrue(supported.all())
-                    np.testing.assert_allclose(z,elevation(road[:,0]-offset,rise),atol=.012)
-                    self.assertGreater(z[160]-max(z[0],z[-1]),1.)
-                    np.testing.assert_array_equal(labels(road),254)
+                    height = elevation(road[:,0]-offset,rise)
+                    expected = np.where(height <= .15, 254, np.where(height <= 1.5, 0, 205))
+                    np.testing.assert_array_equal(labels(road), expected)
                     obstacles = samples[-28:-1]
-                    np.testing.assert_array_equal(labels(obstacles[:,:2]),0)
+                    expected_blocks = np.where(obstacles[:,2] <= 1.5, 0,
+                        np.where(elevation(obstacles[:,0]-offset,rise) <= 1.5, 0, 205))
+                    np.testing.assert_array_equal(labels(obstacles[:,:2]), expected_blocks)
                     gap = np.array([[offset+6.225,.425],[offset+6.325,.475]])
-                    self.assertFalse(terrain.height_at(gap)[1].any())
                     np.testing.assert_array_equal(labels(gap),205)
                     rows,cols = np.nonzero(image == 254)
                     free_xy = np.column_stack((cols+.5,rows+.5))*nav['resolution']+nav['origin'][:2]
-                    self.assertTrue(terrain.height_at(free_xy)[1].all())
-                    # Independent fixture truth: only road returns match the
-                    # analytic hill. Each appears once in each of two scans.
-                    floor = samples[np.isclose(samples[:,2], elevation(samples[:,0]-offset,rise))]
+                    # Every free cell has real repeated endpoints in the initial
+                    # plane's band. No ray-only cell or slope extrapolation is free.
+                    floor = samples[(samples[:,2] >= -.035) & (samples[:,2] <= .15)]
                     hits = Counter(map(tuple, np.repeat(np.floor(floor[:,:2]/nav['resolution'])
                                                         .astype(int), 2, axis=0)))
                     for cell in np.floor(free_xy/nav['resolution']).astype(int):
@@ -128,16 +134,17 @@ class SlopingMapIntegration(unittest.TestCase):
                     expected = np.rint(samples*1000).astype(np.int64)
                     np.testing.assert_array_equal(actual[np.lexsort(actual.T[::-1])],
                                                   expected[np.lexsort(expected.T[::-1])])
-                    terrain_file = bundle / meta['terrain_model']['file']
-                    before = terrain_file.stat().st_mtime_ns
+                    grid_file = bundle/'nav.pgm'
+                    before = grid_file.stat().st_mtime_ns
                     self.assertEqual(prepare(source,root/'cache'),bundle)
-                    self.assertEqual(terrain_file.stat().st_mtime_ns,before)
+                    self.assertEqual(grid_file.stat().st_mtime_ns,before)
                     self.assertEqual(hashlib.sha256(pcd.read_bytes()).digest(),original)
-                    # A bad model must never be served as a complete cache hit.
-                    with terrain_file.open('wb') as stream:
-                        np.savez(stream,version=np.int32(999))
-                    with self.assertRaises(ValueError):
+                    # A cache with stale policy must not pass as the fixed-plane map.
+                    meta['floor_rejection_height'] = .05
+                    (bundle/'metadata.yaml').write_text(yaml.safe_dump(meta))
+                    with self.assertRaisesRegex(ValueError, '地面过滤规则'):
                         prepare(source,root/'cache')
+
 
 
 if __name__ == '__main__':

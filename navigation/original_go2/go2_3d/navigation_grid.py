@@ -56,6 +56,9 @@ def build_bundle(root, source, output):
         points, metadata.get('parameters', {}).get('floor_z', -0.30))
     transform, model, body_height = ground_alignment(
         points, ground, metadata.get('body_height_above_ground'))
+    # Historical bundles may carry terrain descriptors. Runtime copies now
+    # use only their own saved initial plane; the original files stay intact.
+    model.pop('_terrain', None)
     start_pose = validate_start_pose(transform @ resolve_start_pose(root, source))
     aligned_points = transform_points(points, transform)
     grid = ObservedGrid(policy['grid_resolution'])
@@ -84,7 +87,10 @@ def build_bundle(root, source, output):
                                 leveled_from=str(source), map_from_previous_map=transform.tolist(),
                                 map_from_source_map=transform.tolist(), point_count=len(points),
                                 initial_pose_reference='z=0: standing body above floor; nonzero z: explicit body height',
-                                navigation_denoise=report, free_area_version=2, restored_free_cells=restored)
+                                navigation_denoise=report, free_area_version=2, restored_free_cells=restored,
+                                ground_filter_mode='initial_plane',
+                                floor_rejection_height=policy['obstacle_min_height'])
+        runtime_metadata.pop('terrain_model', None)
         (staged/'metadata.yaml').write_text(yaml.safe_dump(runtime_metadata))
         validate_bundle(staged)
         output.mkdir(parents=True, exist_ok=True)
@@ -96,3 +102,4 @@ def build_bundle(root, source, output):
           f'body_height={body_height:.3f}m; floor_z=0; PCD_points={len(points)}; '
           f'denoise={report}; original bundle retained', flush=True)
     return output
+

@@ -23,7 +23,6 @@ NOETIC = HERE.parent / 'noetic'
 sys.path.insert(0, str(NOETIC))
 sys.path.insert(0, str(GO2))
 from surveyed_corridor import index_from_document, read_document
-from corridor_reference import trajectory_reference
 from denoise import clean_directory
 from geometry import ObservedGrid
 from ground import floor_and_obstacles
@@ -31,7 +30,6 @@ from map_library import map_name, validate_bundle
 from map_start import validate_start_pose
 from mapping_store import _keys
 from navigation_grid import current_settings
-from terrain import build_terrain, load_terrain
 
 
 class Progress:
@@ -54,9 +52,9 @@ def cache_key(version, inputs):
     digest = hashlib.sha256()
     # The container always sees /map_source. Include actual per-version input
     # identities and the original grid policy used to generate the cached map.
-    for path in [Path(__file__), HERE / 'prepare_map.py', HERE / 'corridor_reference.py',
+    for path in [Path(__file__), HERE / 'prepare_map.py',
                  NOETIC / 'surveyed_corridor.py',
-                 *[GO2 / p for p in ('geometry.py', 'grid_io.py', 'ground.py', 'terrain.py', 'denoise.py',
+                 *[GO2 / p for p in ('geometry.py', 'grid_io.py', 'ground.py', 'denoise.py',
                                      'free_space.py', 'navigation_grid.py',
                                      'navigation_grid.yaml', 'navigation_filter.yaml', 'map_start.py',
                                      'mapping_store.py', 'gicp_dense.yaml')]]:
@@ -82,12 +80,10 @@ def export_grid(chunks, grid, directory, policy, model, surveyed_free=None):
     floor_once = set()
     occupied = {}
     low, high = policy['obstacle_min_height'], policy['obstacle_max_height']
-    terrain = model.get('_terrain')
-    if terrain is not None:
-        # A ray above a slope/gap proves line of sight, not ground support.
-        # A fitted 0.4m terrain cell also cannot prove all of its 5cm pixels
-        # contain ground. Rebuild free evidence from real floor endpoints below.
-        grid.free = set()
+    # A ray passing above the initial plane does not observe traversable
+    # ground. Rebuild free cells from retained ground-band endpoints, plus
+    # explicit surveyed corridors below, for every map format.
+    grid.free = set()
     for cloud in chunks:
         xyz = cloud[:, :3]
         floor, obstacles = floor_and_obstacles(xyz, model, low, high)
@@ -118,11 +114,11 @@ def export_grid(chunks, grid, directory, policy, model, surveyed_free=None):
           file=sys.stderr, flush=True)
     samples = np.asarray(list(occupied.values()), dtype=np.float32).reshape(-1, 3)
     grid.export(samples, directory, floor_z=0., min_height=low, max_height=high,
-                ground_model=model, allow_empty_obstacles=bool(surveyed_free))
+                ground_model=model, allow_empty_obstacles=True)
 
 
 def observed_free_support(grid, xy):
-    """Query fine observed-floor evidence, never the entire terrain-fit cell."""
+    """Query fine observed-floor evidence, without extrapolating into unobserved cells."""
     cells = np.floor(np.asarray(xy, dtype=float) / grid.resolution).astype(np.int64)
     return np.fromiter((tuple(cell) in grid.free for cell in cells), dtype=bool, count=len(cells))
 
@@ -191,25 +187,6 @@ def aligned_chunks(raw, transform, db, voxel):
         progress.report(min(offset+len(points), len(raw)))
 
 
-def voxel_chunks(db):
-    """Stream real averaged XYZ from the existing disk index, without a full copy."""
-    cursor = db.execute('SELECT sx/hits,sy/hits,sz/hits FROM voxels ORDER BY x,y,z')
-    while True:
-        rows = cursor.fetchmany(65536)
-        if not rows:
-            return
-        yield np.asarray(rows, dtype=np.float64)
-
-
-def classification_chunks(raw, transform):
-    progress = Progress('按局部地形分类原始回波', len(raw))
-    for offset in range(0, len(raw), 131072):
-        values = np.array(raw[offset:offset+131072], copy=True)
-        values[:, :3] = apply(values, transform)
-        yield values
-        progress.report(min(offset+len(values), len(raw)))
-
-
 def survey_contract(version, manifest):
     """Only an explicit new-session export can authorize a cleared corridor."""
     filename = manifest['dense'].get('surveyed_corridor')
@@ -221,14 +198,6 @@ def survey_contract(version, manifest):
     document = read_document(version / filename,
                              expected_frame=manifest['dense']['frame_id'].strip('/'))
     names = [filename]
-    if document['version'] == 1 and document['poses']:
-        terrain = document.get('terrain')
-        if not isinstance(terrain, dict):
-            raise ValueError('已清理通行带的地图缺少清理前地形模型')
-        name = terrain.get('file')
-        if not isinstance(name, str) or not name or Path(name).name != name or name in ('.', '..'):
-            raise ValueError('无效的建图地形模型文件名')
-        names.append(name)
     return document, names
 
 
@@ -266,7 +235,6 @@ def trace_archive(version, dest, manifest, files):
     policy = current_settings()
     grid = ObservedGrid(policy['grid_resolution'])
     surveyed_free = set()
-    saved_terrain = None
     corridor = None
     continuous = survey is not None and survey['version'] == 2
     if survey is not None and survey['poses']:
@@ -279,10 +247,6 @@ def trace_archive(version, dest, manifest, files):
                 not np.isclose(float(contract.get('body_height_above_ground', float('nan'))),
                                body_height, atol=1e-6, rtol=0)):
             raise ValueError('通行带的坐标系或机身高度与地图不一致')
-        if not continuous:
-            saved_terrain = load_terrain(version, {'terrain_model': contract})
-            if saved_terrain is None:
-                raise ValueError('旧版通行带缺少清理前地形，请保留该地图的原始配套文件')
         # The source LIO frame may be tilted. Define the all-height rectangle
         # in the calibrated ground frame, with heading from the full body pose.
         corridor = index_from_document(survey, ground)
@@ -292,7 +256,7 @@ def trace_archive(version, dest, manifest, files):
         raise ValueError('本地图没有有效的前进通行带记录，不能生成连续通行栅格；请检查建图前进计数')
     n = len(raw)
     n_scans = first = exact = 0
-    progress = Progress('恢复实测通行区域（扫描帧）', manifest['dense']['scans'])
+    progress = Progress('核对原始扫描索引', manifest['dense']['scans'])
     with (version / files[1]).open(newline='') as stream:
         for row in csv.DictReader(stream):
             stamp, anchor = int(row['stamp_ns']), int(row['anchor_stamp_ns'])
@@ -306,7 +270,6 @@ def trace_archive(version, dest, manifest, files):
                 xyz = apply(raw[offset:offset+count], ground).astype('<f4')
                 if not np.isfinite(xyz).all():
                     raise ValueError('点云包含无效 XYZ')
-                grid.observe(xyz, keyframes[stamp][:3, 3])
                 exact += 1
             first += count
             n_scans += 1
@@ -319,12 +282,8 @@ def trace_archive(version, dest, manifest, files):
     if not np.isfinite(voxel) or voxel <= 0.:
         raise ValueError('原 Go2 dense 的体素尺寸无效')
     model = dict(plane=[0., 0., 1., 0.], height_at_origin=0.)
-    # Full localization voxels and raw navigation endpoints stay unchanged.
-    # Terrain is fitted to supported local surfaces using the optimized body
-    # trajectory, then every original endpoint is classified against it.
-    inverse_mount = np.linalg.inv(mount)
-    anchors = np.asarray([(pose @ inverse_mount)[:3, 3] for pose in keyframes.values()])
-    anchors[:, 2] -= body_height
+    # The saved initial ground plane is the only height reference. Keep
+    # full 3D localization geometry and classify navigation endpoints separately.
     with tempfile.TemporaryDirectory(dir=dest.parent, prefix='voxels-') as tmp:
         with closing(sqlite3.connect(Path(tmp)/'map.sqlite')) as db:
             db.execute('PRAGMA journal_mode=OFF')
@@ -332,37 +291,10 @@ def trace_archive(version, dest, manifest, files):
             db.execute('PRAGMA cache_size=-32768')
             db.execute('CREATE TABLE voxels (x INTEGER,y INTEGER,z INTEGER,sx REAL,sy REAL,'
                        'sz REAL,si REAL,hits INTEGER,ni INTEGER, PRIMARY KEY(x,y,z)) WITHOUT ROWID')
-            for _ in aligned_chunks(raw, ground, db, voxel):
-                pass
-            if continuous:
-                print('正在从已记录机身轨迹生成道路高度参考（不拟合点云地形）……',
-                      file=sys.stderr, flush=True)
-                terrain = trajectory_reference(corridor, body_height, grid.resolution,
-                                               surveyed_free, start_pose=start_pose)
-            elif saved_terrain is None:
-                print('正在从局部点云和优化轨迹建立地形高程（不使用统一地面高度）……',
-                      file=sys.stderr, flush=True)
-                terrain = build_terrain(voxel_chunks(db), anchors, work_directory=Path(tmp),
-                                        progress=lambda stage, count: print(
-                                            f'局部地形：{stage} {count:,}', file=sys.stderr, flush=True))
-            else:
-                terrain = saved_terrain
-                print('复用本次建图清理前记录的局部地形；通行带作为单独人工确认信息。',
-                      file=sys.stderr, flush=True)
-            statistics = terrain.statistics
-            if continuous:
-                print(f'轨迹道路参考完成：{statistics["supported_cells"]:,} 格；'
-                      f'交叉高度冲突 {statistics["discontinuity_cells"]:,} 格保留未知。'
-                      '只使用已记录机身高度和站立高度，不做点云地形拟合。',
-                      file=sys.stderr, flush=True)
-            else:
-                print(f'局部地形完成：支持 {statistics["supported_cells"]:,}/'
-                      f'{statistics["candidate_cells"]:,} 个候选格；'
-                      f'台阶/不连续边界 {statistics["discontinuity_cells"]:,} 格保守保留。',
-                      file=sys.stderr, flush=True)
-            terrain_metadata = terrain.save(dest/('road_reference.npz' if continuous else 'terrain.npz'))
-            export_grid(classification_chunks(raw, ground), grid, dest, policy,
-                        dict(model, _terrain=terrain), surveyed_free=surveyed_free)
+            print('按保存的起点地面基准过滤 0–15cm；不执行坡面、地形或轨迹高度拟合。',
+                  file=sys.stderr, flush=True)
+            export_grid(aligned_chunks(raw, ground, db, voxel), grid, dest, policy,
+                        model, surveyed_free=surveyed_free)
             retained = write_voxel_map(db, dest/'map.pcd', voxel)
     print('正在按原规则去除导航栅格孤立噪点……', file=sys.stderr, flush=True)
     report = clean_directory(dest, free_support=lambda xy: observed_free_support(grid, xy))
@@ -371,15 +303,14 @@ def trace_archive(version, dest, manifest, files):
                     pc_geometry=geometry_kind,
                     ground_aligned=True,
                     body_height_above_ground=body_height, ground_model=model,
-                    terrain_model=terrain_metadata,
+                    ground_filter_mode='initial_plane',
+                    floor_rejection_height=policy['obstacle_min_height'],
                     map_start_pose=start_pose.tolist(), map_from_source_map=ground.tolist(),
                     body_from_lidar=mount.tolist(), sensor_frame=sensor, source_frame=source,
                     parameters=dict(policy, map_name=name, floor_z=0., map_voxel_size=voxel), free_area_version=2,
                     exact_origin_scans=exact, scans=n_scans, navigation_denoise=report)
     if survey is not None:
         runtime_survey = dict(survey)
-        if 'terrain' in survey:
-            runtime_survey['terrain'] = dict(survey['terrain'], file='terrain.npz')
         (dest/'surveyed_corridor.json').write_text(json.dumps(runtime_survey, ensure_ascii=False, indent=2)+'\n')
         metadata['surveyed_corridor'] = dict(file='surveyed_corridor.json',
             events=len(survey['poses']), free_cells=len(surveyed_free), policy=survey['policy'])
@@ -407,16 +338,16 @@ def prepare(version, cache):
         if output.exists():
             validate_bundle(output)
             metadata = yaml.safe_load((output/'metadata.yaml').read_text())
-            if load_terrain(output, metadata) is None:
-                raise ValueError(f'导航缓存缺少局部地形模型: {output}')
+            if (metadata.get('ground_filter_mode') != 'initial_plane' or
+                    metadata.get('floor_rejection_height') != current_settings()['obstacle_min_height'] or
+                    'terrain_model' in metadata):
+                raise ValueError(f'导航缓存地面过滤规则不匹配: {output}')
             if not (output / 'observed_free.npz').is_file():
                 raise ValueError(f'导航缓存缺少通行区域文件: {output}')
             if survey is not None:
                 cached_survey = read_document(output/'surveyed_corridor.json',
                                               expected_frame=survey['frame_id'])
                 expected_survey = dict(survey)
-                if 'terrain' in survey:
-                    expected_survey['terrain'] = dict(survey['terrain'], file='terrain.npz')
                 if cached_survey != expected_survey:
                     raise ValueError(f'导航缓存通行带与源地图不一致: {output}')
             print(f'复用已完成的导航地图缓存：{output.name}', file=sys.stderr, flush=True)
@@ -428,7 +359,6 @@ def prepare(version, cache):
             stage.mkdir()
             trace_archive(version, stage, manifest, files)
             validate_bundle(stage)
-            load_terrain(stage, yaml.safe_load((stage/'metadata.yaml').read_text()))
             stage.rename(output)
     return output
 

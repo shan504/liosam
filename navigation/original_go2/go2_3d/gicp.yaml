@@ -14,7 +14,7 @@ go2_gicp:
     grid_resolution: 0.10
     # map origin is the first body pose. Measure ground height before Nav2.
     floor_z: -0.30
-    obstacle_min_height: 0.10
+    obstacle_min_height: 0.15
     obstacle_max_height: 1.5
     # Compatibility name: advisory only, never reject a keyframe or crop history.
     max_map_points: 10000000

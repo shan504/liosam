@@ -28,6 +28,15 @@ def message(points, *, frame='map', stamp=(5, 7)):
 
 
 class DisplayCloudGeometry(unittest.TestCase):
+    def test_components_span_blocks_and_do_not_clip_large_map_extent(self):
+        # Each block alone is smaller than the eight-cell group threshold;
+        # the complete object survives. The isolated distant return does not.
+        connected=np.array([[100000.+.02+x*.05,-100000.+.02+y*.05,.4]
+                            for y in range(2) for x in range(4)])
+        points=np.vstack((connected, [[-200000.,200000.,.5]]))
+        result=display_cloud.display_points(message(points),{'plane':[0,0,1,0]},block_size=3)
+        np.testing.assert_array_equal(result,connected.astype('<f4'))
+
     def test_live_display_uses_classified_obstacles_without_plane_or_road_refilter(self):
         from geometry import pose_matrix
         transform = pose_matrix([10., 4., 3.], [0., 0., np.sin(np.pi/4), np.cos(np.pi/4)])
@@ -55,11 +64,11 @@ class DisplayCloudGeometry(unittest.TestCase):
                     corridor = display_cloud.load_display_corridor(directory, metadata)
                     cloud = message([[.4, .1, .4], [.4, .1, 5.], [.4, .8, .4], [2., 0., 3.]])
                     model = dict(plane=[0., 0., 1., 0.])
-                    np.testing.assert_allclose(display_cloud.display_points(cloud, model, corridor=corridor),
+                    np.testing.assert_allclose(display_cloud.display_points(cloud, model, corridor=corridor, noise_min_cells=1),
                                                [[.4, .8, .4], [2., 0., 3.]])
                     # Same live scan must keep an actual person or obstacle
                     # in the road: the recorded corridor is no blind zone.
-                    self.assertEqual(len(display_cloud.display_points(cloud, model)), 4)
+                    self.assertEqual(len(display_cloud.display_points(cloud, model, noise_min_cells=1)), 4)
                     metadata['surveyed_corridor']['file'] = '../surveyed_corridor.json'
                     with self.assertRaises(ValueError):
                         display_cloud.load_display_corridor(directory, metadata)
@@ -95,7 +104,7 @@ class DisplayCloudGeometry(unittest.TestCase):
                         # Loading each selected map repeatedly cannot reuse a
                         # previous map's floor elevation or normal.
                         loaded = display_cloud.ground_model(json.loads((folder/'metadata.yaml').read_text()))
-                        result = display_cloud.display_points(cloud, loaded, block_size=2)
+                        result = display_cloud.display_points(cloud, loaded, block_size=2, noise_min_cells=1)
                         expected = np.column_stack([xy, z])[3:]
                         np.testing.assert_allclose(result, expected, atol=1e-6)
                         self.assertGreater((result@plane[:3]+plane[3]).max(), 7.9)
@@ -108,7 +117,7 @@ class DisplayCloudGeometry(unittest.TestCase):
         blocks = list(display_cloud.xyz_blocks(cloud, block_size=1024))
         self.assertEqual(sum(len(block) for block in blocks), len(x))
         self.assertTrue(all(len(block) <= 1024 for block in blocks))
-        result = display_cloud.display_points(cloud, {'plane':[0., 0., 1., 0.]}, block_size=1024)
+        result = display_cloud.display_points(cloud, {'plane':[0., 0., 1., 0.]}, block_size=1024, noise_min_cells=1)
         expected = points[np.arange(len(x)) % 3 != 0].astype('<f4')
         np.testing.assert_array_equal(result, expected)
         self.assertGreater(result[-1, 0], 10000.)
@@ -123,7 +132,7 @@ class DisplayCloudGeometry(unittest.TestCase):
                    row_step=88, is_bigendian=True, data=bytes(payload),
                    fields=[NS(name=n, offset=o, datatype=8, count=1)
                            for n,o in [('z',0),('x',8),('y',16)]])
-        result = display_cloud.display_points(cloud, {'plane':[0,0,1,0]}, block_size=2)
+        result = display_cloud.display_points(cloud, {'plane':[0,0,1,0]}, block_size=2, noise_min_cells=1)
         np.testing.assert_array_equal(result, xyz[[1,2,4]].astype('<f4'))
 
     def test_empty_invalid_and_wrong_frame_inputs(self):

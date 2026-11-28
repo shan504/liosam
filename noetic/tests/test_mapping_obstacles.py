@@ -11,6 +11,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dense_map import Archive
+from local_detail import local_cloud, single_xyzi
 from mapping_obstacles import filtered_cloud, main
 from save_navigation_dense import export_dense
 
@@ -35,27 +36,35 @@ def organized_cloud(points, big_endian):
     return msg, records
 
 
+def connected_points(x=0., y=0., z=.2):
+    # Eight distinct occupied 5 cm cells. Centers avoid float32 cell boundaries.
+    return [(x + .025 + .05 * i, y + .025 + .05 * j, z)
+            for i in range(4) for j in range(2)]
+
+
 class MappingDisplay(unittest.TestCase):
     def test_local_scan_and_survey_points_keep_their_original_fields(self):
         for x, y, high, endian in [(0., 4., 4.5, False), (31., -12., 17., True)]:
             with self.subTest(origin=(x, y), high=high):
-                points = [(x, y, 0.), (x, y, .099), (x, y, .1), (x+3, y, high),
+                points = [(x, y, 0.), (x, y, .099), (x, y, .15), (x+3, y, high),
                           (x, y, -.2), (float('nan'), y, high), (x, float('inf'), 1.),
                           (x, y, float('nan'))]
+                points += connected_points(x, y, .151)
+                points[-1] = (*points[-1][:2], high)
                 scan, records = organized_cloud(points, endian)
                 raw = scan.data
                 result = filtered_cloud(scan)
-                self.assertEqual((result.height, result.width), (1, 2))
-                self.assertEqual(result.row_step, 2 * scan.point_step)
+                self.assertEqual((result.height, result.width), (1, 8))
+                self.assertEqual(result.row_step, 8 * scan.point_step)
                 self.assertEqual(result.point_step, scan.point_step)
-                self.assertEqual(result.data, records[2] + records[3])
+                self.assertEqual(result.data, b''.join(records[8:]))
                 self.assertEqual(result.fields, scan.fields)
                 self.assertEqual(result.header, scan.header)
                 self.assertEqual(result.is_bigendian, endian)
-                self.assertEqual((scan.height, scan.width, scan.data), (4, 2, raw))
+                self.assertEqual((scan.height, scan.width, scan.data), (8, 2, raw))
 
     def test_floor_only_publishes_an_empty_cloud_in_the_same_frame(self):
-        floor, _ = organized_cloud([(1., 0., 0.), (2., 0., .03)], False)
+        floor, _ = organized_cloud([(1., 0., 0.), (2., 0., .15)], False)
         out = filtered_cloud(floor)
         self.assertEqual((out.height, out.width, out.row_step, out.data), (1, 0, 0, b''))
         self.assertEqual(out.header, floor.header)
@@ -111,13 +120,32 @@ class MappingDisplay(unittest.TestCase):
         with patch.dict(sys.modules, {'rospy': ros, 'sensor_msgs.msg': SimpleNamespace(PointCloud2=object),
                                      'std_msgs.msg': SimpleNamespace(String=object), 'tf2_ros': tf}):
             main()
-        cloud, records = organized_cloud([(1., 2., 0.), (1., 2., 6.)], True)
+        cloud, records = organized_cloud([(1., 2., 0.), (1., 2., .15)] +
+                                         connected_points(1., 2., 6.), True)
         for name in ('dense_map', 'scan'):
             subscribers['/go2_visual/ground_full/' + name](cloud)
             pub = publishers['/go2_visual/ground/' + name]
             self.assertEqual(pub.latch, name == 'dense_map')
-            self.assertEqual(pub.messages[0].data, records[1])
+            self.assertEqual(pub.messages[0].data, b''.join(records[2:]))
             self.assertEqual(pub.messages[0].header.stamp, cloud.header.stamp)
+
+    def test_detail_filters_whole_window_before_sampling_and_single_fallback(self):
+        connected = np.array([(*xyz, i + 20.) for i, xyz in
+                              enumerate(connected_points(z=.2))], dtype='<f4')
+        speckles = np.array([[2., 1., .4, 90.], [2., 1., 9., 91.]], dtype='<f4')
+        floor = connected.copy()
+        floor[:, 2] = .15
+        original = connected.copy()
+        # Neither four-point scan is large enough on its own; their measured
+        # union is. The cap must not make it fail the component test either.
+        out, total, unique = local_cloud([connected[:4], floor, speckles, connected[4:]],
+                                         np.zeros(3), 0., limit=4)
+        self.assertEqual((len(out), total, unique), (4, 8, 8))
+        self.assertTrue(set(out[:, 3]).issubset(set(connected[:, 3])))
+        np.testing.assert_array_equal(connected, original)
+        raw, _ = organized_cloud(connected_points(z=6.) + [(3., 1., 4.), (0., 0., .15)], True)
+        fallback = single_xyzi(raw, 0.)
+        np.testing.assert_allclose(fallback[:, :3], connected_points(z=6.))
 
 
 if __name__ == '__main__':

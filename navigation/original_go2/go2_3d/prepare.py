@@ -57,13 +57,13 @@ def main(mode='mapping'):
                                   'enabled':True, **settings()}
         params['static_layer'] = {'plugin':'nav2_costmap_2d::StaticLayer', 'map_subscribe_transient_local':True}
         # obstacle_cloud.py already selects physical obstacles relative to the
-        # local terrain. Humble filters Z again after transforming into the
+        # saved initial plane. Humble filters Z again after transforming into the
         # costmap's global frame, both in ObservationBuffer and ObstacleLayer:
         # navigation2/humble/nav2_costmap_2d/src/observation_buffer.cpp
         # navigation2/humble/nav2_costmap_2d/plugins/obstacle_layer.cpp
         # A fixed 0..2m global-Z band loses obstacles on uphill/downhill terrain.
         # Admit every finite global Z in these two downstream gates; the shared
-        # terrain-relative physical height limits above remain unchanged.
+        # initial-plane physical height limits remain enforced by the frontend.
         absolute_z = sys.float_info.max
         params['obstacle_layer'] = {'plugin':'nav2_costmap_2d::ObstacleLayer',
             'min_obstacle_height':-absolute_z,'max_obstacle_height':absolute_z,

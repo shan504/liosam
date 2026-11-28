@@ -108,31 +108,42 @@ def body_seed_position(position, model=None, body_height=None, terrain=None):
             plane[2] < 0.9 or not np.isclose(np.linalg.norm(plane[:3]),1.,atol=1e-5) or
             not np.isfinite(body_height) or not 0.1 < body_height < 1.0):
         raise ValueError('Invalid saved standing height/ground plane')
-    if terrain is not None:
-        ground_z, supported = terrain.height_at(result[None, :2])
-        if not supported[0]:
-            raise ValueError('Initial pose has no observed local terrain support; choose a surveyed road position')
-        result[2] = float(ground_z[0]) + body_height
-    else:
-        result[2] = (body_height-plane[3]-plane[:2]@result[:2])/plane[2]
+    # The current shared policy explicitly uses the initial saved plane.
+    # Keep the terrain argument for old callers, but never query its elevation.
+    result[2] = (body_height-plane[3]-plane[:2]@result[:2])/plane[2]
     return result
 
 
-def floor_and_obstacles(points, model, min_height=0.10, max_height=1.5):
-    terrain = model.get('_terrain')
-    if terrain is not None:
-        # Local terrain is a classification reference only; XYZ stays in the
-        # saved map frame for GICP, TF, goals and the occupancy grid.
-        h, supported = terrain.evaluate(points)
-        finite = np.isfinite(points).all(axis=1)
-        floor = points[finite & supported & (np.abs(h) <= 0.035)]
-        # Unsupported surfaces cannot become observed free space. Significant
-        # returns below the supported surface are retained as drop hazards.
-        obstacle = (~supported | ((h >= min_height) & (h <= max_height)) |
-                    (h <= -min_height))
-        return floor, points[finite & obstacle]
-    h = heights(points,model)
-    floor = points[np.abs(h)<=0.035]
-    obstacles = points[(h>=min_height)&(h<=max_height)]
-    return floor,obstacles
+HEIGHT_EPSILON = 1e-6
+
+
+def height_obstacle_mask(heightvector, min_height=0.15, max_height=float('inf')):
+    """Apply the shared inclusive ground rejection band to signed heights."""
+    h = np.asarray(heightvector)
+    return np.isfinite(h) & (h > min_height + HEIGHT_EPSILON) & (h <= max_height)
+
+
+def obstacle_mask(points, model, min_height=0.15, max_height=float('inf')):
+    """Select returns above the fixed initial plane's inclusive rejection band.
+
+    The small tolerance keeps float32 representations of exactly 15 cm out of
+    obstacles. It is not a terrain tolerance or a changing ground estimate.
+    A stored local-terrain object is deliberately never consulted.
+    """
+    points = np.asarray(points)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError('Ground classification needs XYZ points')
+    h = heights(points, model)
+    return np.isfinite(points).all(axis=1) & height_obstacle_mask(h, min_height, max_height)
+
+
+def floor_and_obstacles(points, model, min_height=0.15, max_height=1.5):
+    """Use only the saved initial plane for static evidence and obstacles."""
+    points = np.asarray(points)
+    h = heights(points, model)
+    finite = np.isfinite(points).all(axis=1) & np.isfinite(h)
+    # Only actual returns establish free evidence. Small negative measurement
+    # noise retains the previous 3.5 cm floor tolerance; missing returns don't.
+    floor = points[finite & (h >= -.035) & (h <= min_height + HEIGHT_EPSILON)]
+    return floor, points[obstacle_mask(points, model, min_height, max_height)]
 

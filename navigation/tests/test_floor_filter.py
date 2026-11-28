@@ -23,14 +23,17 @@ class MeasuredFloor(unittest.TestCase):
                 raw = apply(level, transform)
                 aligned = apply(raw, np.linalg.inv(transform))
                 np.testing.assert_array_equal(is_floor(aligned[:, 2]),
-                                              [True, True, False, False, False, False, False])
+                                              [True, True, True, False, False, False, False])
                 np.testing.assert_allclose(map_display_points(aligned), level[[3, 5, 6]], atol=1e-6)
                 np.testing.assert_allclose(aligned, level, atol=1e-12)
 
     def test_display_rejects_ground_and_nonfinite_heights_without_clipping_tall_returns(self):
-        heights = np.array([-np.inf, -.2, 0., .099, .10, .35, 1.50, 1.501, 4., 16., np.inf, np.nan])
-        np.testing.assert_array_equal(obstacle_mask(heights),
-                                      [False, False, False, False, True, True, True, True, True, True, False, False])
+        for dtype in (np.float32, np.float64):
+            heights = np.array([-np.inf, -.2, 0., .10, .15, .151, .35, 1.50, 1.501,
+                                4., 16., np.inf, np.nan], dtype=dtype)
+            np.testing.assert_array_equal(obstacle_mask(heights),
+                                          [False, False, False, False, False, True, True, True,
+                                           True, True, True, False, False])
 
     def test_environment_and_navigation_views_use_distinct_geometry_layers(self):
         layout = json.loads((Path(__file__).resolve().parents[1] / 'foxglove.json').read_text())
@@ -67,7 +70,8 @@ class MeasuredFloor(unittest.TestCase):
                 self.assertTrue(observed(2.))
                 self.assertFalse(observed(3.5))
                 free.fill(0)
-                # Even a low, ambiguous return must stop clearing behind it.
+                # The low return is floor; the genuine 60 cm obstacle still
+                # stops free-space clearing behind it.
                 mixed = floor_hits + [point(1.8, .07), point(2., .6)]
                 observe_rays(free, origin, np.array(mixed), np.zeros(2, dtype=int))
                 self.assertTrue(observed(1.))

@@ -39,6 +39,10 @@ if [[ $mode == check ]]; then
 fi
 files=("$HOME/go2_model_live.pyz" "$here/dense_map.py" "$here/bridge_topics.json" "$here/foxglove_endpoint.py" "$here/display_map_frame.py"
        "$here/../navigation/obstacle_view.py" "$here/mapping_front_filter.py"
+       "$here/../navigation/original_go2/go2_3d/ground.py"
+       "$here/../navigation/original_go2/go2_3d/point_noise.py"
+       "$here/../navigation/original_go2/go2_3d/denoise.py"
+       "$here/../navigation/original_go2/go2_3d/navigation_filter.yaml"
        "$here/surveyed_corridor.py" "$here/corridor_recorder.py"
        "$here/native_lio_seed.py" "$here/native_cloud.py" "$here/native_mount.py"
        "$here/native_inspect_tf.py" "$here/mount_setup.py" "$here/check_returns.py")
@@ -469,7 +473,7 @@ start F_dense /usr/bin/python3 -u "$here/dense_map.py" \
     _surveyed_corridor:=true _corridor_pose_topic:=/lio_sam/mapping/odometry \
     "_corridor_motion_topic:=$motion_pose" \
     "_archive_dir:=$run_dir/dense" _voxel:=0.015 _fine_voxel:=0.0075 _max_points:=450000 _scan_period:=0.09 _period:=3.5
-echo '新建图启用人工确认通行带：前进时清理机身前方 0～1m、左右各 0.5m 的全部高度点云；保存时清理历史点并记录可通行格。'
+echo '新建图启用人工确认通行带：前方 0～1m、左右各 0.5m，保存连续通行区；主 PCD 保留完整定位几何。显示和导航按初始地面过滤 0～15cm 回波及孤立小块。'
 if [[ $mode == go2 ]]; then
     start G_model /usr/bin/python3 -u "$here/native_model.py" _lio_map:=true
 else

@@ -15,7 +15,7 @@ from dense_map import Archive
 from local_detail import Window
 from mapping_obstacles import CorridorView, filtered_cloud
 from surveyed_corridor import make_document
-from test_mapping_obstacles import organized_cloud
+from test_mapping_obstacles import connected_points, organized_cloud
 
 
 IDENTITY = [0., 0., 0., 0., 0., 0., 1.]
@@ -39,23 +39,25 @@ class MappingCorridorView(unittest.TestCase):
         view.update(json.dumps(document(source_body)))
         index = view.index(ground)
         for endian in (False, True):
-            points = [(4., -.5, .2), (4., -.5, 25.), (3.4, -.5, .2),
-                      (4., .2, 4.), (4., -1.1, 2.), (4., -.5, 0.)]
+            points = [(4., -.5, .2), (4., -.5, 25.), (4., -.5, 0.), (-9., -9., 2.)]
+            points += (connected_points(3.2, -.5, .2) + connected_points(4., .2, 4.) +
+                       connected_points(4., -1.2, 2.))
             cloud, records = organized_cloud(points, endian)
             original = cloud.data
             result = filtered_cloud(cloud, index)
-            self.assertEqual(result.data, b''.join(records[i] for i in (2, 3, 4)))
+            self.assertEqual(result.data, b''.join(records[4:]))
             self.assertIs(result.header, cloud.header)
             self.assertEqual(result.fields, cloud.fields)
             self.assertEqual(result.is_bigendian, cloud.is_bigendian)
             self.assertEqual(cloud.data, original)
 
     def test_new_document_clears_old_observations_and_empty_resets(self):
-        cloud, records = organized_cloud([(.5, 0., 8.), (1.1, 0., 8.)], False)
+        cloud, records = organized_cloud(connected_points(.5, 0., 8.) +
+                                         connected_points(1.1, 0., 8.), False)
         view = CorridorView()
         self.assertEqual(filtered_cloud(cloud, view.index(np.eye(4))).data, b''.join(records))
         view.update(json.dumps(document()))
-        self.assertEqual(filtered_cloud(cloud, view.index(np.eye(4))).data, records[1])
+        self.assertEqual(filtered_cloud(cloud, view.index(np.eye(4))).data, b''.join(records[8:]))
         view.update(json.dumps(make_document('odom', [])))
         self.assertEqual(filtered_cloud(cloud, view.index(np.eye(4))).data, b''.join(records))
 
@@ -97,7 +99,9 @@ class LocalDetailCorridor(unittest.TestCase):
             try:
                 a, b = 1_000_000_000, 2_000_000_000
                 archive.path('odom', {a: IDENTITY})
-                old = np.array([[.5, 0., .2, 11.], [.5, 0., 4., 22.], [2., 0., .2, 33.]], '<f4')
+                old = np.array([(*xyz, intensity)
+                                for x, z, intensity in ((.5, .2, 11.), (.5, 4., 22.), (2., .2, 33.))
+                                for xyz in connected_points(x, 0., z)], '<f4')
                 archive.add(a, a, old)
                 archive.db.commit()
                 window = Window(archive.file)
@@ -108,12 +112,14 @@ class LocalDetailCorridor(unittest.TestCase):
                 archive.add_corridor(b, a, np.eye(4))
                 archive.db.commit()
                 _, after, _ = window.read(b, {a, b}, 'odom', tuple(IDENTITY), 0.)
-                np.testing.assert_array_equal(after, old[2:])
+                np.testing.assert_array_equal(after, old[16:])
                 # A corrected keyframe moves both raw points and its corridor.
                 archive.path('odom', {a: [1., 0., 0., 0., 0., 0., 1.]})
                 archive.db.commit()
                 _, corrected, _ = window.read(b, {a, b}, 'odom', tuple(IDENTITY), 0.)
-                np.testing.assert_array_equal(corrected, np.array([[3., 0., .2, 33.]], '<f4'))
+                expected = old[16:].copy()
+                expected[:, 0] += 1.
+                np.testing.assert_allclose(corrected, expected)
                 self.assertEqual(archive.db.execute('SELECT count(*) FROM scans').fetchone()[0], 2)
             finally:
                 if window is not None:

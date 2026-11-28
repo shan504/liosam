@@ -14,9 +14,9 @@ NAVIGATION = Path(__file__).resolve().parents[2]
 if not (NAVIGATION / 'obstacle_view.py').is_file():
     NAVIGATION = Path('/repo/navigation')
 sys.path.insert(0, str(NAVIGATION))
-from obstacle_view import obstacle_mask
-from ground import heights
-from terrain import load_terrain
+from ground import obstacle_mask
+from point_noise import cell_keys, retained_cells
+from navigation_grid import current_settings
 from geometry import pose_matrix, transform_points
 
 NOETIC = NAVIGATION.parent / 'noetic'
@@ -100,35 +100,42 @@ def xyz_blocks(message, block_size=65536):
             yield np.column_stack([chunk[name] for name in ('x', 'y', 'z')])
 
 
-def display_points(message, model, block_size=65536, terrain=None, corridor=None):
+def display_points(message, model, block_size=65536, corridor=None, *, noise_min_cells=None):
     """Select only display obstacles in map coordinates at all retained heights."""
     if message.header.frame_id.lstrip('/') != 'map':
         raise ValueError('Display input must already be registered in map; refusing to relabel coordinates')
 
+    policy = current_settings()
+
     def selected(block):
         finite = np.isfinite(block).all(axis=1)
         result = np.zeros(len(block), dtype=bool)
-        if terrain is None:
-            result[finite] = obstacle_mask(heights(block[finite], model))
-        else:
-            relative, supported = terrain.evaluate(block[finite])
-            # Unsupported terrain is never hidden as if it were known ground.
-            # Keep genuine obstacles at every height, plus low/drop returns.
-            result[finite] = ~supported | obstacle_mask(relative) | (relative <= -.10)
+        result[finite] = obstacle_mask(block[finite], model, policy['obstacle_min_height'])
         if corridor is not None:
             # Only the static navigation presentation omits surveyed road
             # returns. Full map geometry and live sensing keep their points.
             result[finite] &= ~corridor.contains(block[finite])
         return result
 
-    # Two bounded passes allocate exactly one final XYZ array, rather than a
-    # full source XYZ array, full-map mask and multiple retained-cloud copies.
-    count = sum(int(np.count_nonzero(selected(block)))
-                for block in xyz_blocks(message, block_size))
+    # Components span the complete map, not each parsing block. Sparse cell
+    # sets avoid allocating the farm's entire bounding rectangle or imposing
+    # an extent cap. XYZ buffers stay bounded until the final output array.
+    cells = set()
+    for block in xyz_blocks(message, block_size):
+        cells.update(map(tuple, cell_keys(block[selected(block), :2], policy['grid_resolution'])))
+    retained = retained_cells(cells, min_cells=noise_min_cells)
+
+    def clean(block):
+        chosen = block[selected(block)]
+        mask = np.fromiter((tuple(cell) in retained for cell in
+            cell_keys(chosen[:, :2], policy['grid_resolution'])), dtype=bool, count=len(chosen))
+        return chosen[mask]
+
+    count = sum(len(clean(block)) for block in xyz_blocks(message, block_size))
     output = np.empty((count, 3), dtype='<f4')
     offset = 0
     for block in xyz_blocks(message, block_size):
-        kept = block[selected(block)]
+        kept = clean(block)
         output[offset:offset + len(kept)] = kept
         offset += len(kept)
     return output
@@ -161,7 +168,6 @@ def main():
             directory = Path(self.get_parameter('map_directory').value)
             metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
             self.model = ground_model(metadata)
-            self.terrain = load_terrain(directory, metadata)
             self.corridor = load_display_corridor(directory, metadata)
             retained = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                   durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -179,9 +185,7 @@ def main():
             self.create_subscription(PointCloud2, OBSTACLE_TOPIC, self.receive_scan, qos_profile_sensor_data)
             self.create_subscription(Bool, '/localization/valid', self.receive_valid, 1)
             self.create_timer(.2, self.process)
-            if self.terrain is None:
-                self.get_logger().warning('旧地图缓存没有局部地形模型，显示仍使用保存的地面平面；请重新准备导航地图以支持起伏路面。')
-            self.get_logger().info('导航显示：静态地图按保存的地形和通行区显示；实时扫描使用 Nav2 同源地面分类的全高度显示点云，按源时间戳变换。')
+            self.get_logger().info('导航显示：静态地图按初始地面 15cm 过滤、去除孤立簇并保留通行区；实时扫描使用 Nav2 同源过滤的全高度点云，按源时间戳变换。')
 
         def receive_map(self, message):
             if not self.map_published:
@@ -209,8 +213,7 @@ def main():
                 self.scan_header = None
 
         def publish(self, message, publisher, *, static=False):
-            points = display_points(message, self.model, terrain=self.terrain,
-                                    corridor=self.corridor if static else None)
+            points = display_points(message, self.model, corridor=self.corridor if static else None)
             header = copy.deepcopy(message.header)
             header.frame_id = 'map'
             publisher.publish(xyz_message(header, points))

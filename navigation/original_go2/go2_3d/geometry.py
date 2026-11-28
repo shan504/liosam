@@ -148,11 +148,12 @@ class ObservedGrid:
     def observe(self, points, origin):
         self.free.update(self.prepare_observation(points, origin))
 
-    def export(self, points, directory, floor_z=-0.30, min_height=0.10, max_height=1.5,
+    def export(self, points, directory, floor_z=-0.30, min_height=0.15, max_height=1.5,
                ground_model=None, allow_empty_obstacles=False):
         if ground_model is None:
-            obstacle = points[(points[:,2] >= floor_z+min_height) &
-                              (points[:,2] <= floor_z+max_height)]
+            from ground import obstacle_mask
+            obstacle = points[obstacle_mask(points, {'plane': [0., 0., 1., -floor_z]},
+                                            min_height, max_height)]
         else:
             from ground import floor_and_obstacles
             floor,obstacle = floor_and_obstacles(points,ground_model,min_height,max_height)

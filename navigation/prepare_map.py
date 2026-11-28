@@ -17,8 +17,8 @@ RESOLUTION = 0.05
 VOXEL = 0.10
 DISPLAY_VOXEL = 0.04
 MAX_DISPLAY_POINTS = 160_000
-FLOOR_TOLERANCE = 0.045
-OBSTACLE_MIN_HEIGHT = 0.085
+FLOOR_TOLERANCE = 0.035
+OBSTACLE_MIN_HEIGHT = 0.15
 OBSTACLE_MAX_HEIGHT = 0.85
 MAX_VOXELS = 1_500_000
 
@@ -29,7 +29,8 @@ def read_json(path):
 
 def is_floor(height):
     """Test height in metres relative to the measured floor plane."""
-    return np.abs(height) <= FLOOR_TOLERANCE
+    height = np.asarray(height)
+    return np.isfinite(height) & (height >= -FLOOR_TOLERANCE) & (height <= OBSTACLE_MIN_HEIGHT + 1e-6)
 
 
 def rigid(xyz, xyzw):
@@ -249,7 +250,7 @@ def build(version, dest, layout):
             xyz = apply(cloud[start:start+n], ground)
             # Real endpoints on this measured floor; no distant ceiling clears floor.
             observe(free, xyz[is_floor(xyz[:, 2]), :2], lower, False)
-            obs = (xyz[:, 2] >= OBSTACLE_MIN_HEIGHT) & (xyz[:, 2] <= OBSTACLE_MAX_HEIGHT)
+            obs = obstacle_mask(xyz[:, 2]) & (xyz[:, 2] <= OBSTACLE_MAX_HEIGHT)
             observe(obstacles, xyz[obs, :2], lower, True)
             if stamp == anchor:
                 observe_rays(free, poses[anchor][:3, 3], xyz, lower)
@@ -279,7 +280,8 @@ def build(version, dest, layout):
                     body_from_lidar=mount.tolist(), initial_map_from_body=initial.tolist(),
                     initial_base_pose=initial[:3, 3].tolist() + quaternion(initial[:3, :3]).tolist(),
                     grid_resolution=RESOLUTION, voxel_size=VOXEL, scans=n_scans, exact_origin_scans=exact,
-                    floor_band_m=[-FLOOR_TOLERANCE, FLOOR_TOLERANCE],
+                    ground_filter_mode='initial_plane', floor_rejection_height=OBSTACLE_MIN_HEIGHT,
+                    floor_band_m=[-FLOOR_TOLERANCE, OBSTACLE_MIN_HEIGHT],
                     obstacle_band_m=[OBSTACLE_MIN_HEIGHT, OBSTACLE_MAX_HEIGHT],
                     display_voxel_m=display_voxel, display_points=len(display),
                     target_points=len(target), source_version=str(version))

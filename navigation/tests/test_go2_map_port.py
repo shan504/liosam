@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from prepare_go2_map import current_settings, export_grid, prepare
 from prepare_map import apply, point_array, quaternion, rigid, transforms
 from mapping_store import MappingStore
-from terrain import load_terrain
 from geometry import ObservedGrid
 from map_start import start_pose_from_metadata
 from route_store import map_identity
@@ -98,7 +97,9 @@ class Go2MapPort(unittest.TestCase):
                 hit_cells = np.floor(xyz[fixture_floor,:2]/resolution).astype(int)
                 floor_hits = Counter(map(tuple, hit_cells))
                 wall_cells = set(map(tuple, np.floor(xyz[:11,:2]/resolution).astype(int)))
-                terrain = load_terrain(result, yaml_doc)
+                self.assertEqual(yaml_doc['ground_filter_mode'], 'initial_plane')
+                self.assertEqual(yaml_doc['floor_rejection_height'], .15)
+                self.assertNotIn('terrain_model', yaml_doc)
                 def grid_at(directory):
                     nav = yaml.safe_load((directory/'nav.yaml').read_text())
                     with (directory/nav['image']).open('rb') as stream:
@@ -110,17 +111,15 @@ class Go2MapPort(unittest.TestCase):
                     cells = np.indices((w,h)).reshape(2,-1).T + origin
                     return cells, pixels[::-1].T.reshape(-1)
                 cells, labels = grid_at(result)
-                _, support = terrain.height_at((cells+.5)*resolution)
                 actual = dict(zip(map(tuple, cells), labels))
                 self.assertEqual(len(wall_cells), 11)
                 for wall in wall_cells:
                     self.assertEqual(actual[wall], 0)
-                self.assertTrue(np.any(support & (labels == 254)))
-                np.testing.assert_array_equal(labels[support], [
+                self.assertTrue(np.any(labels == 254))
+                np.testing.assert_array_equal(labels, [
                     0 if tuple(cell) in wall_cells else
                     254 if floor_hits[tuple(cell)] >= 2 else 205
-                    for cell in cells[support]])
-                self.assertFalse(np.any(labels[~support] == 254))
+                    for cell in cells])
                 for cell in cells[labels == 254]:
                     self.assertGreaterEqual(floor_hits[tuple(cell)], 2)
                 ident = map_identity(result)

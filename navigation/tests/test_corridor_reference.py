@@ -1,9 +1,10 @@
-"""A lightweight trajectory reference is not fitted ground or blanket clearing."""
+"""Historical trajectory-reference utility remains separate from runtime policy."""
 from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -36,12 +37,15 @@ class CorridorReference(unittest.TestCase):
                 np.testing.assert_array_equal(valid, [True, True, False])
                 np.testing.assert_allclose(z[:2], [.0525, .1525], atol=1e-9)
                 self.assertEqual(model.statistics['evidence'], 'operator_trajectory_reference')
-                # A real raised obstacle within the road is still retained.
+                # The utility can still read old reference data, but the
+                # runtime must classify against its saved initial plane.
                 points = np.array([[*xy[0], z[0]], [*xy[0], z[0]+.2],
-                                   [*xy[2], 0.]])
-                floor, obstacles = floor_and_obstacles(points, {'_terrain': model})
-                np.testing.assert_allclose(floor, points[:1])
-                np.testing.assert_allclose(obstacles, points[1:])
+                                   [*xy[2], 0.], [*xy[1], z[1]]])
+                with patch.object(model, 'evaluate', side_effect=AssertionError('terrain used at runtime')):
+                    floor, obstacles = floor_and_obstacles(points,
+                        {'plane': [0., 0., 1., 0.], '_terrain': model})
+                np.testing.assert_allclose(floor, points[[0, 2]])
+                np.testing.assert_allclose(obstacles, points[[1, 3]])
 
     def test_curved_route_uses_nearby_recorded_segments_and_does_not_bridge_gap(self):
         # U-shaped body trace; opposite sides have different heights. Road
@@ -85,9 +89,11 @@ class CorridorReference(unittest.TestCase):
         np.testing.assert_array_equal(supported, [True, True, False])
         self.assertAlmostEqual(z[0], 0.)
         points = np.array([[*query[0], 0.], [*query[0], .20], [*query[2], 0.]])
-        floor, obstacles = floor_and_obstacles(points, {'_terrain': model})
-        np.testing.assert_allclose(floor, points[:1])
-        np.testing.assert_allclose(obstacles, points[1:])
+        with patch.object(model, 'evaluate', side_effect=AssertionError('terrain used at runtime')):
+            floor, obstacles = floor_and_obstacles(points,
+                {'plane': [0., 0., 1., 0.], '_terrain': model})
+        np.testing.assert_allclose(floor, points[[0, 2]])
+        np.testing.assert_allclose(obstacles, points[1:2])
 
 
 if __name__ == '__main__':

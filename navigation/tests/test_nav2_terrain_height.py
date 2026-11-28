@@ -1,4 +1,4 @@
-"""Generated Nav2 YAML keeps terrain-filtered returns at any global elevation."""
+"""Nav2 keeps plane-filtered returns after transforming into costmap frames."""
 import contextlib
 import importlib.util
 import io
@@ -11,9 +11,13 @@ import unittest
 from unittest import mock
 
 import yaml
+import numpy as np
 
 
 GO2 = Path(__file__).resolve().parents[1] / 'original_go2' / 'go2_3d'
+sys.path.insert(0, str(GO2))
+from geometry import ObservedGrid
+from grid_io import read_pgm
 
 
 def sdk_config():
@@ -80,19 +84,19 @@ def generated_config(directory):
     return yaml.safe_load(text), text
 
 
-class Nav2TerrainHeight(unittest.TestCase):
+class Nav2FilteredHeight(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.config, self.serialized = generated_config(Path(self.temp.name) / 'config')
 
-    def test_both_costmaps_and_both_global_z_gates_admit_uphill_and_downhill(self):
+    def test_both_costmaps_admit_filtered_points_in_different_frame_heights(self):
         # ObservationBuffer first filters source bounds after its map/odom TF;
         # ObstacleLayer then checks its own bounds. Fixing only one loses data.
         for name in ('local_costmap', 'global_costmap'):
             layer = self.config[name][name]['ros__parameters']['obstacle_layer']
             for elevation in (-10.0, 0.0, 10.0):
-                for relative_height in (0.10, 0.30, 1.5):
+                for relative_height in (0.16, 0.30, 1.5):
                     point_z = elevation + relative_height
                     with self.subTest(costmap=name, z=point_z):
                         self.assertTrue(all(gate['min_obstacle_height'] <= point_z <=
@@ -112,7 +116,9 @@ class Nav2TerrainHeight(unittest.TestCase):
 
     def test_physical_height_policy_and_collision_configuration_stay_separate(self):
         policy = yaml.safe_load((GO2 / 'navigation_grid.yaml').read_text())
-        self.assertEqual(policy['obstacle_min_height'], 0.10)
+        self.assertEqual(policy['obstacle_min_height'], 0.15)
+        mapper_config = yaml.safe_load((GO2 / 'gicp.yaml').read_text())['go2_gicp']['ros__parameters']
+        self.assertEqual(mapper_config['obstacle_min_height'], policy['obstacle_min_height'])
         self.assertEqual(policy['obstacle_max_height'], 1.5)
         for name in ('local_costmap', 'global_costmap'):
             params = self.config[name][name]['ros__parameters']
@@ -136,6 +142,30 @@ class Nav2TerrainHeight(unittest.TestCase):
                 minimal_group_size=8, group_connectivity_type=8))
         planner = self.config['planner_server']['ros__parameters']['GridBased']
         self.assertFalse(planner['allow_unknown'])
+
+    def test_legacy_export_rejects_inclusive_floor_band_with_or_without_saved_plane(self):
+        for floor_z in (-0.30, 2.0):
+            for use_plane in (False, True):
+                with self.subTest(floor_z=floor_z, saved_plane=use_plane):
+                    directory = Path(self.temp.name) / f'grid-{floor_z}-{use_plane}'
+                    z = floor_z + np.array([.0, .10, .15, .151, .5, 1.49, 1.501])
+                    points = np.column_stack((np.arange(len(z))+.025,
+                                              np.full(len(z), .025), z)).astype('f4')
+                    before = points.copy()
+                    grid = ObservedGrid(.05)
+                    cells = np.floor(points[:, :2]/grid.resolution).astype(int)
+                    grid.free = set(map(tuple, cells))
+                    model = {'plane': [0., 0., 1., -floor_z]} if use_plane else None
+                    nav = grid.export(points, directory, floor_z=floor_z, ground_model=model)
+                    image = read_pgm(directory/'nav.pgm')
+                    lower = np.rint(np.array(nav['origin'][:2])/grid.resolution).astype(int)
+                    try:
+                        values = [int(image[image.shape[0]-1-(y-lower[1]), x-lower[0]])
+                                  for x, y in cells]
+                        self.assertEqual(values, [254, 254, 254, 0, 0, 0, 254])
+                        np.testing.assert_array_equal(points, before)
+                    finally:
+                        image._mmap.close()
 
 
 if __name__ == '__main__':

@@ -9,7 +9,7 @@ import threading
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'navigation'))
-from obstacle_view import obstacle_mask
+from obstacle_view import keep_connected, obstacle_mask
 from corridor_recorder import pose_matrix
 from surveyed_corridor import CorridorIndex, rigid_matrix, validate_document
 
@@ -40,13 +40,17 @@ def filtered_cloud(msg, corridor=None):
         values = np.ndarray((height, width), dtype=dtype, buffer=msg.data, offset=f.offset,
                             strides=(msg.row_step, step))
         keep &= obstacle_mask(values) if name == 'z' else np.isfinite(values)
-        if corridor is not None:
-            coordinates.append(values)
+        coordinates.append(values)
     if corridor is not None and keep.any():
         # Only the membership test uses XYZ arrays. Publish original records,
         # including all extra fields and the original timestamp/byte order.
         xyz = np.column_stack([value[keep] for value in coordinates])
         keep[keep] &= ~corridor.contains(xyz)
+    if keep.any():
+        # Count occupied XY cells across the entire cloud before compacting.
+        # Duplicate returns do not turn isolated speckle into a large object.
+        xy = np.column_stack([value[keep] for value in coordinates[:2]])
+        keep[keep] &= keep_connected(xy)
     records = np.ndarray((height, width), dtype='V%d' % step, buffer=msg.data,
                          strides=(msg.row_step, step))
     selected = records[keep]

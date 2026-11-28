@@ -1,12 +1,10 @@
-"""Local-terrain filtering through production live/display callbacks without ROS."""
+"""Fixed initial-plane policy through production live/display callbacks without ROS."""
 import copy
-import contextlib
 import importlib.util
 import json
 from pathlib import Path
 import sys
 import tempfile
-import time
 from types import ModuleType, SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
@@ -36,24 +34,8 @@ class TFError(Exception):
     pass
 
 
-class AnalyticTerrain:
-    """A saved-surface fixture; core tests separately validate model construction."""
-    def __init__(self, shift, slope):
-        self.shift, self.slope = np.asarray(shift), np.asarray(slope)
-        self.evaluated = []
-    def ground(self, xy):
-        return (np.asarray(xy)-self.shift[:2])@self.slope+self.shift[2]
-    def evaluate(self, xyz):
-        xyz = np.asarray(xyz)
-        self.evaluated.append(xyz.copy())
-        supported = np.linalg.norm(xyz[:,:2]-self.shift[:2], axis=1) < 8.
-        relative = xyz[:,2]-self.ground(xyz[:,:2])
-        relative[~supported] = np.nan
-        return relative, supported
-
-
-class LiveTerrainCallbacks(unittest.TestCase):
-    def fake_runtime(self, directory, terrain=None, load_saved=False):
+class FixedPlaneCallbacks(unittest.TestCase):
+    def fake_runtime(self, directory):
         pubs, subs, queries = {}, {}, []
         current = NS(ns=100_000_000_000, ready=True, matrix=np.eye(4))
         class Node:
@@ -100,85 +82,105 @@ class LiveTerrainCallbacks(unittest.TestCase):
         mods['tf2_ros'].TransformListener=lambda buffer,node:None
         mods['tf2_ros'].TransformException=TFError
         mods['ros_cloud'].xyz_message=lambda header,points:NS(header=copy.deepcopy(header),points=points.copy())
-        mods['navigation_grid'].current_settings=lambda:dict(obstacle_min_height=.1,obstacle_max_height=1.5)
+        mods['navigation_grid'].current_settings=lambda:dict(obstacle_min_height=.15,obstacle_max_height=1.5,grid_resolution=.05)
         spec=importlib.util.spec_from_file_location('test_live_obstacle_module',GO2/'obstacle_cloud.py')
         module=importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules,mods):
             spec.loader.exec_module(module)
-            loader = contextlib.nullcontext() if load_saved else patch.object(module,'load_terrain',return_value=terrain)
-            with loader:
-                node=module.ObstacleCloud()
+            node=module.ObstacleCloud()
         return module,node,pubs,subs,queries,current
 
-    def test_real_saved_terrain_load_is_shared_by_live_and_display(self):
-        from terrain import TerrainModel, load_terrain
+    @staticmethod
+    def clusters(plane):
+        xy = np.array([[.0125+x*.05,.0125+y*.05] for y in range(2) for x in range(4)])
+        bands = [0., .05, .15, .151, .4, 1.4, 8., -.2]
+        rows = []
+        for i,h in enumerate(bands):
+            horizontal = xy + [i*2.,0.]
+            z = (h-plane[3]-horizontal@plane[:2])/plane[2]
+            rows.append(np.column_stack((horizontal,z)))
+        return np.concatenate(rows), bands
+
+    def test_saved_initial_plane_boundary_and_exact_time_tf_for_two_maps(self):
         import display_cloud
         with tempfile.TemporaryDirectory() as temp:
-            for name,base,slope in [('yard',0.,0.),('orchard',1.5,.2)]:
+            for name, plane in [('yard',np.array([0.,0.,1.,.327])),
+                                ('farm',np.array([.05,-.08,1.,-.6]))]:
                 with self.subTest(map=name):
+                    plane /= np.linalg.norm(plane[:3])
                     folder=Path(temp)/name
                     folder.mkdir()
-                    cells=np.array([[0,0],[1,0],[2,0]])
-                    centers=(cells+.5)*.4
-                    planes=np.column_stack([np.full(3,slope),np.zeros(3),base+slope*centers[:,0]])
-                    surface=TerrainModel(cells,planes)
-                    metadata=dict(frame_id='map',ground_model=dict(plane=[0,0,1,0]),
-                                  terrain_model=surface.save(folder/'terrain.npz'))
+                    metadata=dict(frame_id='map',ground_model=dict(plane=plane.tolist()),
+                        body_height_above_ground=.327,
+                        terrain_model=dict(file='must-not-load-this-missing-terrain.npz'))
                     (folder/'metadata.yaml').write_text(json.dumps(metadata))
-                    _,node,pubs,_,_,_=self.fake_runtime(folder,load_saved=True)
-                    node.on_valid(NS(data=True))
-                    xyz=np.array([[.1,.1,base+slope*.1],
-                                  [.5,.1,base+slope*.5+.3],
-                                  [.9,.1,base+slope*.9+8.],
-                                  [2.,.1,base]])
-                    node.receive(message(xyz,frame='base_link',stamp=(99,900000000)))
-                    node.process()
-                    np.testing.assert_allclose(pubs['/navigation/obstacle_cloud'].messages[-1].points,
-                                               xyz[[1,3]],atol=1e-6)
-                    loaded=load_terrain(folder,metadata)
-                    output=display_cloud.display_points(message(xyz),metadata['ground_model'],terrain=loaded)
-                    np.testing.assert_allclose(output,xyz[[1,2,3]],atol=1e-6)
-
-    def test_two_maps_live_tf_relative_height_and_unknown_are_conservative(self):
-        with tempfile.TemporaryDirectory() as temp:
-            for name,shift,slope in [('yard',[0,0,0],[0,0]),
-                                     ('hill',[10,-5,1.4],[.2,-.04])]:
-                with self.subTest(map=name):
-                    directory=Path(temp)/name
-                    directory.mkdir()
-                    (directory/'metadata.yaml').write_text(json.dumps(dict(ground_model=dict(plane=[0,0,1,0]))))
-                    surface=AnalyticTerrain(shift,slope)
-                    module,node,pubs,subs,queries,current=self.fake_runtime(directory,surface)
-                    m=np.array([[0.,-1,0,shift[0]],[1,0,0,shift[1]],[0,0,1,shift[2]+.327],[0,0,0,1]])
-                    current.matrix=m
-                    xy=np.array([[1,0],[2,0],[3,0],[20,0],[4,0]],dtype=float)+shift[:2]
-                    heights=np.array([0,.4,2.,0.,-.2])
-                    world=np.column_stack([xy,surface.ground(xy)+heights])
-                    body=transform_points(world,np.linalg.inv(m))
+                    module,node,pubs,subs,queries,current=self.fake_runtime(folder)
+                    # Legacy terrain descriptors are ignored, including an
+                    # invalid file path. New scans cannot replace the plane.
+                    self.assertFalse(hasattr(module,'load_terrain'))
+                    self.assertFalse(hasattr(node,'terrain'))
+                    self.assertFalse(hasattr(module,'measured_ground'))
+                    world,bands=self.clusters(plane)
+                    current.matrix=np.array([[0.,-1.,0.,2.],[1.,0.,0.,-1.],
+                                             [0.,0.,1.,.327],[0.,0.,0.,1.]])
+                    body=transform_points(world,np.linalg.inv(current.matrix))
                     cloud=message(body,frame='base_link',stamp=(99,900000000))
                     original=cloud.data
                     subs['/localization/valid'][0](NS(data=True))
                     subs['/point_cloud2'][0](cloud)
                     node.process()
-                    output=pubs['/navigation/obstacle_cloud'].messages[-1]
-                    np.testing.assert_allclose(output.points,body[[1,3,4]],atol=1e-6)
-                    np.testing.assert_allclose(surface.evaluated[-1],world,atol=1e-6)
-                    self.assertEqual(output.header.frame_id,'base_link')
-                    self.assertEqual(output.header.stamp,cloud.header.stamp)
+                    collision=pubs['/navigation/obstacle_cloud'].messages[-1]
+                    display=pubs['/navigation/measured_scan_obstacles'].messages[-1]
+                    # The exact 15 cm rejection boundary is common to both
+                    # streams; only Nav2 omits the high scene returns.
+                    np.testing.assert_allclose(collision.points,body[24:48],atol=2e-6)
+                    np.testing.assert_allclose(display.points,body[24:56],atol=2e-6)
+                    self.assertEqual(collision.header.frame_id,'base_link')
+                    self.assertEqual(collision.header.stamp,cloud.header.stamp)
                     self.assertEqual(queries,[('map','base_link',99_900_000_000)])
-                    self.assertEqual(pubs['/navigation/obstacle_cloud'].qos,'sensor_qos')
                     self.assertEqual(cloud.data,original)
-                    # Pure newly received ground clears the last obstacle cloud.
-                    empty=message(body[[0]],frame='base_link',stamp=(99,950000000))
-                    node.receive(empty)
+                    # Whole-map display and live companion use the same
+                    # threshold and retain the full vertical scene.
+                    result=display_cloud.display_points(message(world),metadata['ground_model'],block_size=3)
+                    np.testing.assert_allclose(result,world[24:56],atol=2e-6)
+                    node.report()
+                    status=json.loads(pubs['/navigation/obstacle_status'].messages[-1].data)
+                    self.assertEqual(status['ground_filter_mode'],'initial_plane')
+                    self.assertEqual(status['floor_rejection_height'],.15)
+                    self.assertEqual(status['ground_rejected_points'],32)
+                    self.assertEqual(status['isolated_rejected_points'],0)
+                    self.assertEqual(status['source_stamp_ns'],99_900_000_000)
+                    # A new ground-only scan replaces the point cloud with an
+                    # empty observation; it never asserts blind free rays.
+                    node.receive(message(body[:8],frame='base_link',stamp=(99,950000000)))
                     node.process()
                     self.assertEqual(pubs['/navigation/obstacle_cloud'].messages[-1].points.shape,(0,3))
+
+    def test_isolated_clusters_removed_from_both_outputs_without_corridor_blind_zone(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp)
+            (folder/'metadata.yaml').write_text(json.dumps(dict(ground_model=dict(plane=[0,0,1,0]))))
+            _,node,pubs,_,_,_=self.fake_runtime(folder)
+            # This connected obstacle lies in the surveyed front metre. It
+            # must remain in the real-time collision input. Duplicating one
+            # distant isolated cell many times does not make a large object.
+            connected=np.array([[.52+x*.05,.02+y*.05,.3] for y in range(2) for x in range(4)])
+            noise=np.tile([5.,5.,.4],(40,1))
+            world=np.vstack((connected,noise,connected+[0,0,5.]))
+            node.on_valid(NS(data=True))
+            node.receive(message(world,frame='base_link',stamp=(99,900000000)))
+            node.process()
+            np.testing.assert_allclose(pubs['/navigation/obstacle_cloud'].messages[-1].points,connected)
+            np.testing.assert_allclose(pubs['/navigation/measured_scan_obstacles'].messages[-1].points,
+                                       np.vstack((connected,connected+[0,0,5.])))
+            self.assertEqual(node.counts['isolated_rejected_points'],40)
+            self.assertEqual(node.counts['front_obstacle_points'],8)
 
     def test_missing_tf_waits_without_relabel_and_invalid_or_stale_inputs_do_not_publish(self):
         with tempfile.TemporaryDirectory() as temp:
             directory=Path(temp)
             (directory/'metadata.yaml').write_text(json.dumps(dict(ground_model=dict(plane=[0,0,1,0]))))
-            _,node,pubs,subs,queries,current=self.fake_runtime(directory,AnalyticTerrain([0,0,0],[.2,0]))
+            _,node,pubs,subs,queries,current=self.fake_runtime(directory)
             node.on_valid(NS(data=True))
             current.ready=False
             cloud=message([[1,0,1]],frame='base_link',stamp=(99,900000000))
@@ -189,8 +191,7 @@ class LiveTerrainCallbacks(unittest.TestCase):
             current.ready=True
             node.process()
             self.assertEqual(len(pubs['/navigation/obstacle_cloud'].messages),1)
-
-            node.receive(cloud)  # duplicate source stamp
+            node.receive(cloud)
             node.receive(message([[1,0,1]],frame='odom',stamp=(99,950000000)))
             node.receive(message([[1,0,1]],frame='base_link',stamp=(98,0)))
             node.process()
@@ -201,58 +202,7 @@ class LiveTerrainCallbacks(unittest.TestCase):
             self.assertFalse(node.pending)
             self.assertEqual(len(pubs['/navigation/obstacle_cloud'].messages),1)
 
-    def test_current_measured_slope_outside_saved_strip_and_diagnostics(self):
-        from terrain import TerrainModel
-        with tempfile.TemporaryDirectory() as temp:
-            for name,shift,slope in [('yard',np.array([0.,0.,0.]),0.),
-                                     ('farm',np.array([20.,-4.,1.4]),.12)]:
-                with self.subTest(map=name):
-                    directory=Path(temp)/name
-                    directory.mkdir()
-                    (directory/'metadata.yaml').write_text(json.dumps(dict(
-                        ground_model=dict(plane=[0,0,1,0]),body_height_above_ground=.327)))
-                    # Deliberately empty/narrow saved support: this caused floor
-                    # returns outside operator-cleared strips to be obstacles.
-                    saved=TerrainModel([],[])
-                    _,node,pubs,_,_,current=self.fake_runtime(directory,saved)
-                    current.matrix[:3,3]=shift+[0,0,.327]
-                    xx,yy=np.meshgrid(np.arange(-2.37,2.4,.06),np.arange(-2.37,2.4,.06))
-                    floor=np.column_stack((xx.ravel(),yy.ravel(),slope*xx.ravel()))+shift
-                    obstacle=shift+[.7,.1,slope*.7+.3]
-                    high=shift+[.7,.1,slope*.7+8.]
-                    world=np.vstack((floor,obstacle,high))
-                    body=transform_points(world,np.linalg.inv(current.matrix))
-                    node.on_valid(NS(data=True))
-                    node.receive(message(body,frame='base_link',stamp=(99,900000000)))
-                    node.process()
-                    result=pubs['/navigation/obstacle_cloud'].messages[-1].points
-                    self.assertLess(len(result),len(floor)*.1)
-                    self.assertTrue(np.min(np.linalg.norm(result-body[-2],axis=1))<1e-6)
-                    self.assertTrue(np.min(np.linalg.norm(result-body[-1],axis=1))>1.)
-                    visual=pubs['/navigation/measured_scan_obstacles'].messages[-1]
-                    self.assertTrue(np.min(np.linalg.norm(visual.points-body[-1],axis=1))<1e-6)
-                    self.assertEqual(visual.header.frame_id,'base_link')
-                    self.assertEqual(visual.header.stamp,NS(sec=99,nanosec=900000000))
-                    node.report()
-                    status=json.loads(pubs['/navigation/obstacle_status'].messages[-1].data)
-                    self.assertEqual(status['state'],'publishing_current_obstacles')
-                    self.assertGreater(status['measured_ground_points'],len(floor)*.9)
-                    self.assertGreaterEqual(status['front_obstacle_points'],1)
-                    self.assertEqual(status['source_stamp_ns'],99_900_000_000)
-                    node.on_valid(NS(data=False))
-                    node.report()
-                    self.assertFalse(json.loads(pubs['/navigation/obstacle_status'].messages[-1].data)['localization_valid'])
-
-    def test_display_keeps_all_heights_unknown_and_drops_while_removing_uphill_ground(self):
-        import display_cloud
-        for shift,slope in [([0,0,0],[0,0]),([20,-3,1.4],[.2,.05])]:
-            surface=AnalyticTerrain(shift,slope)
-            xy=np.array([[1,0],[2,0],[3,0],[20,0],[4,0]],dtype=float)+shift[:2]
-            points=np.column_stack([xy,surface.ground(xy)+[0,.2,8.,0.,-.2]])
-            cloud=message(points)
-            output=display_cloud.display_points(cloud,{'plane':[0,0,1,0]},block_size=2,terrain=surface)
-            np.testing.assert_allclose(output,points[[1,2,3,4]],atol=1e-6)
-
 
 if __name__ == '__main__':
     unittest.main()
+

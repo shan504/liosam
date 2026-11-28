@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'navigation'))
-from obstacle_view import obstacle_mask
+from obstacle_view import keep_connected, obstacle_mask
 from dense_map import cell_ids, geometry, hashes
 from corridor_export import load_corridor_document
 from corridor_recorder import pose_matrix
@@ -71,7 +71,12 @@ def local_cloud(clouds, center, ground_band, limit=CAP):
     if not chunks:
         return np.empty((0, 4), '<f4'), 0, 0
     p = np.concatenate(chunks)
+    # Classify the whole measured window before display sampling. Splitting
+    # by scan or capping first would break real connected objects into speckle.
+    p = p[keep_connected(p[:, :2])]
     total = len(p)
+    if not total:
+        return np.empty((0, 4), '<f4'), 0, 0
     k = cell_ids(np.floor(p[:, :3].astype(np.float64)/VOXEL))
     unique, idx = np.unique(k, return_index=True)
     p = p[idx]  # newest scans came first; every output is a real observation
@@ -173,6 +178,7 @@ def single_xyzi(msg, band):
                                    strides=(msg.row_step, msg.point_step)).reshape(-1)
     valid = np.isfinite(out[:, :3]).all(axis=1)
     valid &= detail_mask(out[:, 2], band)
+    valid[valid] &= keep_connected(out[valid, :2])
     return out[valid]
 
 

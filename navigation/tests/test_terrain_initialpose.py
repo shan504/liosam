@@ -36,20 +36,20 @@ def hint(position=(0., 0., 0.), quaternion=(0., 0., 0., 1.)):
         orientation=NS(**dict(zip(('x', 'y', 'z', 'w'), quaternion))))))
 
 
-class TerrainInitialHeight(unittest.TestCase):
-    def test_uphill_and_downhill_use_local_ground_in_two_map_origins(self):
+class FixedPlaneInitialHeight(unittest.TestCase):
+    def test_historical_terrain_is_ignored_in_two_map_origins(self):
         for xy, ground_z in [((7.1, 30.76), 1.3), ((-140.23, 72.15), -.85)]:
             with self.subTest(xy=xy, ground_z=ground_z):
                 model = terrain_at(xy, ground_z)
                 position = np.array([*xy, 0.])
                 result = body_seed_position(position, GROUND, BODY_HEIGHT, terrain=model)
-                np.testing.assert_allclose(result, [*xy, ground_z+BODY_HEIGHT])
+                np.testing.assert_allclose(result, [*xy, BODY_HEIGHT])
                 np.testing.assert_array_equal(position, [*xy, 0.])
 
-    def test_unknown_ground_refuses_zero_height_hint(self):
+    def test_hint_outside_historical_terrain_uses_saved_plane(self):
         model = terrain_at((3., 4.), .7)
-        with self.assertRaisesRegex(ValueError, 'no observed local terrain support'):
-            body_seed_position([30., 40., 0.], GROUND, BODY_HEIGHT, terrain=model)
+        result = body_seed_position([30., 40., 0.], GROUND, BODY_HEIGHT, terrain=model)
+        np.testing.assert_allclose(result, [30., 40., BODY_HEIGHT])
 
     def test_explicit_nonzero_body_z_is_never_lifted(self):
         model = terrain_at((3., 4.), .7)
@@ -100,23 +100,35 @@ class MapperInitialPose(unittest.TestCase):
         node.get_logger = lambda: NS(error=self.errors.append, warning=self.errors.append)
         node.report = self.reports.append
 
-    def test_manual_2d_hint_lifts_locally_and_invalidates_old_match(self):
+    def test_manual_2d_hint_uses_initial_plane_and_invalidates_old_match(self):
         node = self.node
         node.initial_pose(hint((7.1, 30.76, 0.)))
         self.assertEqual(self.errors, [])
-        np.testing.assert_allclose(node.pending_initial_pose[0][:3, 3], [7.1, 30.76, 1.67])
+        np.testing.assert_allclose(node.pending_initial_pose[0][:3, 3], [7.1, 30.76, BODY_HEIGHT])
         self.assertFalse(node.initialized)
         self.assertFalse(node.seeded)
         self.assertTrue(node.initial_hint_used)
         self.assertEqual(node.generation, 1)
         self.assertIsNone(node.last_accepted)
 
-    def test_unknown_hint_does_not_replace_previous_pose_or_trust(self):
+    def test_hint_outside_historical_terrain_waits_for_new_match(self):
         node = self.node
         previous = (np.eye(4), 9.)
         node.pending_initial_pose = previous
         node.initial_pose(hint((100., 200., 0.)))
-        self.assertIn('no observed local terrain support', self.errors[0])
+        self.assertEqual(self.errors, [])
+        np.testing.assert_allclose(node.pending_initial_pose[0][:3, 3], [100., 200., BODY_HEIGHT])
+        self.assertFalse(node.initialized)
+        self.assertFalse(node.seeded)
+        self.assertEqual(node.generation, 1)
+        self.assertIsNone(node.last_accepted)
+
+    def test_nonfinite_hint_preserves_previous_pose_and_trust(self):
+        node = self.node
+        previous = (np.eye(4), 9.)
+        node.pending_initial_pose = previous
+        node.initial_pose(hint((np.nan, 200., 0.)))
+        self.assertTrue(self.errors)
         self.assertIs(node.pending_initial_pose, previous)
         self.assertTrue(node.initialized)
         self.assertEqual(node.generation, 0)

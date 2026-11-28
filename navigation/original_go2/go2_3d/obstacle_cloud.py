@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Use selected-map local terrain for obstacles, preserving sensor stamps."""
+"""Filter initial-plane ground and isolated clusters, preserving sensor stamps."""
 import json
 import time
 from collections import deque
@@ -14,25 +14,19 @@ from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer,TransformListener,TransformException
 from geometry import cloud_xyz,pose_matrix,transform_points
-from ground import heights
+from ground import heights, obstacle_mask
+from point_noise import keep_connected
 from ros_cloud import xyz_message
 from navigation_grid import current_settings
-from terrain import load_terrain
-from live_ground import measured_ground, relative_heights
 
 
-def obstacle_selection(points_map, plane, min_height, max_height, terrain=None, measured=None):
+def obstacle_selection(points_map, plane, min_height, max_height):
     """Classify in map geometry without moving or relabeling the output points.
 
-    Missing local terrain support is not evidence of free space. Keep those
-    returns, and returns substantially below the saved surface, as obstacles.
+    The selected map's saved initial plane is fixed throughout the run. The
+    rejection band includes its upper boundary, including float32 roundoff.
     """
-    if terrain is None and measured is None:
-        h = heights(points_map, plane)
-        return (h >= min_height) & (h <= max_height)
-    h, supported, _ = relative_heights(points_map, plane, terrain, measured)
-    return (~supported | ((h >= min_height) & (h <= max_height)) |
-            (supported & (h <= -min_height)))
+    return obstacle_mask(points_map, plane, min_height, max_height)
 
 
 class ObstacleCloud(Node):
@@ -42,10 +36,9 @@ class ObstacleCloud(Node):
         directory = Path(self.get_parameter('map_directory').value)
         metadata = yaml.safe_load((directory/'metadata.yaml').read_text())
         self.model = metadata['ground_model']
-        self.terrain = load_terrain(directory, metadata)
-        self.standing_height = metadata.get('body_height_above_ground')
         p = current_settings()
         self.min_height,self.max_height = p['obstacle_min_height'],p['obstacle_max_height']
+        self.resolution = p['grid_resolution']
         self.valid,self.valid_received = False,None
         self.pending = deque(maxlen=20)
         self.last_received_stamp = None
@@ -62,12 +55,9 @@ class ObstacleCloud(Node):
         self.create_subscription(PointCloud2,'/point_cloud2',self.receive,qos_profile_sensor_data)
         self.create_timer(0.05,self.process)
         self.create_timer(1.0,self.report)
-        if self.terrain is None:
-            self.get_logger().warning('旧地图缓存没有局部地形模型，仍使用保存的地面平面；请重新准备导航地图以支持起伏路面。')
-        self.get_logger().info(f'Live obstacle heights relative to '
-            f'{"local terrain" if self.terrain is not None else "legacy ground plane"}: '
-            f'{self.min_height}..{self.max_height}m; measured scan ground enabled=' 
-            f'{self.standing_height is not None}; unsupported terrain remains an obstacle')
+        self.get_logger().info(f'Live obstacle heights above fixed saved initial plane: '
+            f'>{self.min_height}..{self.max_height}m; isolated XY clusters removed; '
+            'no local terrain or slope estimation')
 
     def report(self):
         age = None if self.last_processed_stamp is None else (
@@ -134,25 +124,23 @@ class ObstacleCloud(Node):
             points = cloud_xyz(msg)
             points = points[np.isfinite(points).all(axis=1)]
             points_map = transform_points(points,matrix)
-            # A cleared, trajectory-only map cannot identify live ground
-            # outside its narrow road strip. Use actual returns anchored to
-            # the calibrated body height; never clear a blind front box.
-            measured = (measured_ground(points_map,matrix[:3,3],self.standing_height)
-                        if self.standing_height is not None else None)
-            keep = obstacle_selection(points_map,self.model,self.min_height,
-                                      self.max_height,self.terrain,measured)
-            selected = points[keep]
-            self.pub.publish(xyz_message(msg.header,selected))
-            h,supported,live = relative_heights(points_map,self.model,self.terrain,measured)
-            visual = ~supported | (h>=self.min_height) | (supported & (h<=-self.min_height))
+            # Both outputs use one fixed ground decision and one cluster
+            # decision. Only the Nav2 stream applies its collision-height cap.
+            above_ground = obstacle_selection(points_map,self.model,self.min_height,float('inf'))
+            visual = np.zeros(len(points),dtype=bool)
+            visual[above_ground] = keep_connected(points_map[above_ground,:2],self.resolution)
+            keep = visual & obstacle_selection(points_map,self.model,self.min_height,self.max_height)
+            self.pub.publish(xyz_message(msg.header,points[keep]))
             self.full_pub.publish(xyz_message(msg.header,points[visual]))
+            h = heights(points_map,self.model)
             front = (points[:,0]>=0.) & (points[:,0]<=1.) & (np.abs(points[:,1])<=.5)
             self.counts = dict(input_points=len(points), obstacle_points=int(keep.sum()),
                 display_points_all_heights=int(visual.sum()),
-                measured_ground_points=int(live.sum()), unsupported_points=int((~supported).sum()),
-                below_reference_points=int((supported & (h<=-self.min_height)).sum()),
+                ground_filter_mode='initial_plane', floor_rejection_height=self.min_height,
+                ground_rejected_points=int((~above_ground).sum()),
+                isolated_rejected_points=int((above_ground & ~visual).sum()),
+                below_reference_points=int((h<0.).sum()),
                 front_obstacle_points=int((front & keep).sum()),
-                front_unknown_points=int((front & ~supported).sum()),
                 source_frame=msg.header.frame_id, source_stamp_ns=stamp.nanoseconds)
             self.last_processed_stamp = stamp.nanoseconds
             self.state = 'publishing_current_obstacles'

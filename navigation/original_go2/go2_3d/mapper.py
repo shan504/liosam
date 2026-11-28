@@ -28,7 +28,6 @@ from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
 from registration import cloud, align, static_correction_is_consistent, blend_correction, odometry_is_stationary
 from ros_cloud import xyz_message
 from ground import body_seed_position
-from terrain import load_terrain
 from map_start import start_pose_from_metadata
 from localization_hold import OdometryBudget
 from mapping_store import MappingStore
@@ -67,7 +66,7 @@ class Mapper(Node):
                         voxel_size=0.15, map_voxel_size=0.06, keyframe_max_interval=2.0,
                         scan_window=0.0, map_publish_period=2.0,
                         grid_resolution=0.10, floor_z=-0.30,
-                        obstacle_min_height=0.10, obstacle_max_height=1.5,
+                        obstacle_min_height=0.15, obstacle_max_height=1.5,
                         max_map_points=10000000, submap_radius=25.0,
                         registration_period=0.5, validity_timeout=1.0,
                         correspondence_distance=0.7, min_fitness=0.55, max_rmse=0.20,
@@ -173,7 +172,6 @@ class Mapper(Node):
         self.static_map_published = False
         self.grid = ObservedGrid(self.p['grid_resolution'])
         self.map_metadata = {}
-        self.terrain = None
         self.saved_start_pose = None
         self.recovery_ever_localized = False
         self.recovery_trusted_received = None
@@ -189,7 +187,9 @@ class Mapper(Node):
         if self.p['mode'] == 'localization':
             directory = Path(self.p['map_directory'])
             self.map_metadata = yaml.safe_load((directory/'metadata.yaml').read_text())
-            self.terrain = load_terrain(directory, self.map_metadata)
+            # The common policy uses this map's initial saved ground plane.
+            # Retained archives may still contain a historical terrain file;
+            # localization neither loads it nor uses it to lift a 2D hint.
             if self.p['auto_initialize'] and self.p['initial_from_map_start']:
                 self.saved_start_pose = start_pose_from_metadata(self.map_metadata)
             self._points = np.asarray(o3d.io.read_point_cloud(str(directory/'map.pcd')).points).copy()
@@ -525,8 +525,7 @@ class Mapper(Node):
                 position = [pose.position.x,pose.position.y,pose.position.z]
                 if not exact_body_pose:
                     position = body_seed_position(position, self.map_metadata.get('ground_model'),
-                                                  self.map_metadata.get('body_height_above_ground'),
-                                                  terrain=self.terrain)
+                                                  self.map_metadata.get('body_height_above_ground'))
                 map_base = pose_matrix(position,
                                        [pose.orientation.x,pose.orientation.y,pose.orientation.z,pose.orientation.w])
             except ValueError as error:

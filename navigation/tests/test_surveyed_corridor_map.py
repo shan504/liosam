@@ -20,7 +20,7 @@ from prepare_go2_map import prepare
 from prepare_map import apply, point_array, quaternion, rigid
 from save_navigation_dense import export_dense
 from surveyed_corridor import POLICY, make_document
-from terrain import build_terrain, load_terrain
+from terrain import build_terrain
 
 
 def digest_tree(directory):
@@ -206,7 +206,8 @@ class SurveyedCorridorMapIntegration(unittest.TestCase):
             floor = np.column_stack((xy, np.zeros(len(xy))))
             probes = np.array([[1.7, .6, .55], [0., .8, .55]])
             blocks = np.vstack([probe + [dx, dy, 0.] for probe in probes
-                                for dx in (-.025, 0., .025) for dy in (-.025, 0., .025)])
+                                for dx in (-.1, -.05, 0., .05, .1)
+                                for dy in (-.1, -.05, 0., .05, .1)])
             road = np.vstack((floor, blocks, [[1.7, .6, 15.], [0., .8, 15.]]))
             source = np.column_stack((apply(apply(road, record['lane']), record['saved_from_map']),
                                       np.arange(1, len(road)+1)))
@@ -233,7 +234,7 @@ class SurveyedCorridorMapIntegration(unittest.TestCase):
             doc = json.loads((record['version']/'surveyed_corridor.json').read_text())
             self.assertEqual(len(doc['paths']), 1)
             self.assertEqual(len(doc['paths'][0]), len(route))
-            with patch('prepare_go2_map.build_terrain', side_effect=AssertionError('no raw terrain fit')):
+            with patch('terrain.build_terrain', side_effect=AssertionError('no raw terrain fit')):
                 bundle = prepare(record['version'], root/'cache')
             xy_probes = apply(probes, record['lane'])[:, :2]
             np.testing.assert_array_equal(grid_labels(bundle, xy_probes), [254, 0])
@@ -270,7 +271,7 @@ class SurveyedCorridorMapIntegration(unittest.TestCase):
                     np.testing.assert_allclose([event['body_pose'] for event in document['poses']],
                                                record['events'], atol=1e-10)
                     self.assertGreater(sum(map(len, document['paths'])), len(document['poses']))
-                    with patch('prepare_go2_map.build_terrain', side_effect=AssertionError('do not move cloud fit to navigation')):
+                    with patch('terrain.build_terrain', side_effect=AssertionError('do not move cloud fit to navigation')):
                         bundle = prepare(version, root / 'cache')
                     probes = apply(np.array([[.55, 0., 0.], [2.0875, .0125, 0.], [3.55, 0., 0.]]), record['lane'])[:, :2]
                     # The disconnected rectangles and all intervening road now form one lane.
@@ -287,10 +288,11 @@ class SurveyedCorridorMapIntegration(unittest.TestCase):
                     lane_geometry = apply(localized, np.linalg.inv(record['lane']))
                     self.assertTrue(np.any((lane_geometry[:, 2] > 14.) &
                                            (np.abs(lane_geometry[:, 1]) < .5)))
-                    reference = load_terrain(bundle, meta)
-                    heights, supported = reference.height_at(probes)
-                    self.assertTrue(supported.all())
-                    np.testing.assert_allclose(heights, .04 * np.array([.55, 2.0875, 3.55]), atol=.025)
+                    self.assertEqual(meta['ground_filter_mode'], 'initial_plane')
+                    self.assertEqual(meta['floor_rejection_height'], .15)
+                    self.assertNotIn('terrain_model', meta)
+                    self.assertFalse((bundle/'terrain.npz').exists())
+                    self.assertFalse((bundle/'road_reference.npz').exists())
                     copied = json.loads((bundle / meta['surveyed_corridor']['file']).read_text())
                     self.assertEqual(copied, document)
                     # Every full cell inside the straight rotated corridor is free;
@@ -332,11 +334,13 @@ class SurveyedCorridorMapIntegration(unittest.TestCase):
                 prepare(empty['version'], root / 'cache')
             self.assertEqual(json.loads((empty['version'] / 'surveyed_corridor.json').read_text())['poses'], [])
 
-    def test_existing_v1_map_keeps_discrete_geometry_and_stored_terrain(self):
+    def test_existing_v1_map_keeps_discrete_corridor_without_loading_terrain(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             record = make_recording(root, 'old_marked_route', tilted=True)
             make_v1_saved_bundle(record)
+            # Legacy descriptor still supplies calibration, not runtime terrain.
+            (record['version']/'survey_terrain.npz').unlink()
             before = digest_tree(record['version'])
             bundle = prepare(record['version'], root / 'cache')
             probes = apply(np.array([[.55, 0., 0.], [3.55, 0., 0.]]), record['lane'])[:, :2]
@@ -363,12 +367,13 @@ class SurveyedCorridorMapIntegration(unittest.TestCase):
                 prepare(source, cache)
             cached_doc.write_bytes(original)
             metadata = yaml.safe_load((first / 'metadata.yaml').read_text())
-            cached_reference = first / metadata['terrain_model']['file']
-            reference_bytes = cached_reference.read_bytes()
-            cached_reference.write_bytes(b'broken cached trajectory reference')
-            with self.assertRaises((ValueError, OSError)):
+            metadata_path = first/'metadata.yaml'
+            original_metadata = metadata_path.read_bytes()
+            metadata['ground_filter_mode'] = 'terrain'
+            metadata_path.write_text(yaml.safe_dump(metadata))
+            with self.assertRaisesRegex(ValueError, '地面过滤规则'):
                 prepare(source, cache)
-            cached_reference.write_bytes(reference_bytes)
+            metadata_path.write_bytes(original_metadata)
             document_path = source / 'surveyed_corridor.json'
             original_doc = json.loads(document_path.read_text())
             document_path.write_text(json.dumps(original_doc, separators=(',', ':')))
