@@ -15,6 +15,7 @@ if not (NAVIGATION / 'obstacle_view.py').is_file():
 sys.path.insert(0, str(NAVIGATION))
 from obstacle_view import obstacle_mask
 from ground import heights
+from terrain import load_terrain
 
 MAP_TOPIC = '/navigation/display/map_obstacles'
 SCAN_TOPIC = '/navigation/display/scan_obstacles'
@@ -68,7 +69,7 @@ def xyz_blocks(message, block_size=65536):
             yield np.column_stack([chunk[name] for name in ('x', 'y', 'z')])
 
 
-def display_points(message, model, block_size=65536):
+def display_points(message, model, block_size=65536, terrain=None):
     """Select only display obstacles in map coordinates at all retained heights."""
     if message.header.frame_id.lstrip('/') != 'map':
         raise ValueError('Display input must already be registered in map; refusing to relabel coordinates')
@@ -76,7 +77,13 @@ def display_points(message, model, block_size=65536):
     def selected(block):
         finite = np.isfinite(block).all(axis=1)
         result = np.zeros(len(block), dtype=bool)
-        result[finite] = obstacle_mask(heights(block[finite], model))
+        if terrain is None:
+            result[finite] = obstacle_mask(heights(block[finite], model))
+        else:
+            relative, supported = terrain.evaluate(block[finite])
+            # Unsupported terrain is never hidden as if it were known ground.
+            # Keep genuine obstacles at every height, plus low/drop returns.
+            result[finite] = ~supported | obstacle_mask(relative) | (relative <= -.10)
         return result
 
     # Two bounded passes allocate exactly one final XYZ array, rather than a
@@ -104,7 +111,9 @@ def main():
             super().__init__('go2_navigation_display')
             self.declare_parameter('map_directory', '/runtime/navigation_map')
             directory = Path(self.get_parameter('map_directory').value)
-            self.model = ground_model(yaml.safe_load((directory / 'metadata.yaml').read_text()))
+            metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
+            self.model = ground_model(metadata)
+            self.terrain = load_terrain(directory, metadata)
             retained = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                   durability=DurabilityPolicy.TRANSIENT_LOCAL)
             self.map_output = self.create_publisher(PointCloud2, MAP_TOPIC, retained)
@@ -115,7 +124,9 @@ def main():
             self.create_subscription(PointCloud2, '/map_cloud', self.receive_map, retained)
             self.create_subscription(PointCloud2, '/registered_cloud', self.receive_scan, qos_profile_sensor_data)
             self.create_timer(.2, self.process)
-            self.get_logger().info('导航显示：使用本地图地面标定去除低于 10cm 的点；保留全部高度障碍。定位和代价地图输入不变。')
+            if self.terrain is None:
+                self.get_logger().warning('旧地图缓存没有局部地形模型，显示仍使用保存的地面平面；请重新准备导航地图以支持起伏路面。')
+            self.get_logger().info('导航显示：按本地图局部地形去地面；未知区域、地形落差及全部高度障碍保持可见。')
 
         def receive_map(self, message):
             if not self.map_published:
@@ -128,7 +139,7 @@ def main():
                 self.pending_scan = message  # Only newest accepted registered scan; no growing queue.
 
         def publish(self, message, publisher):
-            points = display_points(message, self.model)
+            points = display_points(message, self.model, terrain=self.terrain)
             header = copy.deepcopy(message.header)
             header.frame_id = 'map'
             publisher.publish(xyz_message(header, points))

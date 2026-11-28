@@ -1,4 +1,5 @@
 """Old Go2 grid, calibrated body start and route identity survive map conversion."""
+from collections import Counter
 import csv
 import hashlib
 import json
@@ -15,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from prepare_go2_map import current_settings, export_grid, prepare
 from prepare_map import apply, point_array, quaternion, rigid, transforms
 from mapping_store import MappingStore
-from denoise import clean_directory
+from terrain import load_terrain
 from geometry import ObservedGrid
 from map_start import start_pose_from_metadata
 from route_store import map_identity
@@ -66,7 +67,7 @@ class Go2MapPort(unittest.TestCase):
             root = Path(tmp)
             fingerprints = set()
             for name,offset,tilt in [('room_a',-1.1,.0), ('survey_b',2.3,.12)]:
-                src, level, body, lidar = write_archive(root, name, offset, tilt)
+                src, level, body, _ = write_archive(root, name, offset, tilt)
                 backup = hashlib.sha256((src/(name+'.pcd')).read_bytes()).digest()
                 result = prepare(src, root/'cache')
                 self.assertEqual(prepare(src, root/'cache'), result)
@@ -89,13 +90,39 @@ class Go2MapPort(unittest.TestCase):
                 self.assertEqual(len(cloud),len(level))
                 np.testing.assert_array_equal(np.sort(cloud[:,3]), np.arange(len(level)))
                 self.assertGreater(yaml_doc['navigation_denoise']['removed_cells'],0)
-                original = ObservedGrid(current_settings()['grid_resolution'])
-                original.observe(xyz[:len(level)], lidar[:3,3])
-                direct = root/'reference'/name
-                original.export(xyz, direct, ground_model=yaml_doc['ground_model'])
-                clean_directory(direct)
-                self.assertEqual((result/'nav.yaml').read_bytes(), (direct/'nav.yaml').read_bytes())
-                self.assertEqual((result/'nav.pgm').read_bytes(), (direct/'nav.pgm').read_bytes())
+                # Count independently labelled fixture floor endpoints in the
+                # 5 cm output lattice. Neither a coarse terrain patch nor a
+                # line of sight through a fine cell supplies its second hit.
+                resolution = current_settings()['grid_resolution']
+                fixture_floor = np.tile(level[:,2] == 0., 2)
+                hit_cells = np.floor(xyz[fixture_floor,:2]/resolution).astype(int)
+                floor_hits = Counter(map(tuple, hit_cells))
+                wall_cells = set(map(tuple, np.floor(xyz[:11,:2]/resolution).astype(int)))
+                terrain = load_terrain(result, yaml_doc)
+                def grid_at(directory):
+                    nav = yaml.safe_load((directory/'nav.yaml').read_text())
+                    with (directory/nav['image']).open('rb') as stream:
+                        self.assertEqual(stream.readline(), b'P5\n')
+                        w, h = map(int, stream.readline().split())
+                        self.assertEqual(stream.readline(), b'255\n')
+                        pixels = np.frombuffer(stream.read(), 'u1').reshape(h, w)
+                    origin = np.rint(np.array(nav['origin'][:2])/nav['resolution']).astype(int)
+                    cells = np.indices((w,h)).reshape(2,-1).T + origin
+                    return cells, pixels[::-1].T.reshape(-1)
+                cells, labels = grid_at(result)
+                _, support = terrain.height_at((cells+.5)*resolution)
+                actual = dict(zip(map(tuple, cells), labels))
+                self.assertEqual(len(wall_cells), 11)
+                for wall in wall_cells:
+                    self.assertEqual(actual[wall], 0)
+                self.assertTrue(np.any(support & (labels == 254)))
+                np.testing.assert_array_equal(labels[support], [
+                    0 if tuple(cell) in wall_cells else
+                    254 if floor_hits[tuple(cell)] >= 2 else 205
+                    for cell in cells[support]])
+                self.assertFalse(np.any(labels[~support] == 254))
+                for cell in cells[labels == 254]:
+                    self.assertGreaterEqual(floor_hits[tuple(cell)], 2)
                 ident = map_identity(result)
                 self.assertEqual(ident['label'],name)
                 fingerprints.add(ident['fingerprint'])
@@ -162,3 +189,4 @@ class Go2MapPort(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

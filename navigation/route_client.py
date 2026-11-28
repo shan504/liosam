@@ -12,22 +12,30 @@ from route_store import validate_route
 RESULT_PREFIX = 'GO2_ROUTE_RESULT '
 
 
-def exchange(request, timeout=12.0):
-    import rclpy
-    from std_msgs.msg import String
-
+def validate_request(request):
     if not isinstance(request, dict):
         raise ValueError('Expected route command object')
     identity = request.get('request_id')
     if not isinstance(identity, str) or str(UUID(identity)) != identity:
         raise ValueError('Invalid route request ID')
     command = request.get('command')
-    if command not in ('snapshot', 'load', 'run'):
+    if command not in ('snapshot', 'load', 'run', 'check', 'replace'):
         raise ValueError('Invalid route command')
-    if set(request) != {'request_id', 'command'} | ({'route'} if command != 'snapshot' else set()):
+    extra = {'route'} if command in ('load', 'run') else {'number'} if command == 'replace' else set()
+    if set(request) != {'request_id', 'command'} | extra:
         raise ValueError('Unexpected route command fields')
-    if command != 'snapshot':
+    if command in ('load', 'run'):
         validate_route(request['route'])
+    if command == 'replace' and (type(request['number']) is not int or request['number'] < 1):
+        raise ValueError('Waypoint number must be a positive integer')
+    return identity
+
+
+def exchange(request, timeout=12.0):
+    identity = validate_request(request)
+    import rclpy
+    from std_msgs.msg import String
+
     encoded = json.dumps(request, separators=(',', ':'), allow_nan=False)
     answers = []
     rclpy.init()

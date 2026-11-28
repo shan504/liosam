@@ -116,13 +116,8 @@ def _hash_file(path):
     return digest.hexdigest()
 
 
-def map_identity(directory):
-    """Fingerprint the prepared runtime map, once, rather than a mutable map name.
-
-    PCD bytes, occupancy image and coordinate metadata bind the route to the
-    same map geometry. Paths and creation timestamps are deliberately excluded
-    so an unchanged archived/copied bundle can still reuse its route.
-    """
+def _map_descriptor(directory):
+    """Read the exact descriptor used by existing v1 route fingerprints."""
     # Saving/listing route files on the host only needs the standard library.
     # YAML is needed for map identity in the ROS container, not the host CLI.
     import yaml
@@ -149,13 +144,90 @@ def map_identity(directory):
                       occupancy=_hash_file(_map_file(directory, image)),
                       grid={key: value for key, value in nav.items() if key != 'image'},
                       geometry=geometry)
-    encoded = json.dumps(_canonical(descriptor), sort_keys=True, separators=(',', ':'),
-                         allow_nan=False).encode('utf-8')
     parameters = metadata.get('parameters', {})
     label = parameters.get('map_name') if isinstance(parameters, dict) else None
     if not isinstance(label, str) or not label or len(label) > 256 or any(ord(c) < 32 for c in label):
         label = directory.name or 'map'
-    return dict(frame_id='map', fingerprint=hashlib.sha256(encoded).hexdigest(), label=label)
+    return descriptor, label, nav
+
+
+def _descriptor_hash(descriptor):
+    encoded = json.dumps(_canonical(descriptor), sort_keys=True, separators=(',', ':'),
+                         allow_nan=False).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def map_identity(directory):
+    """Keep the original strict PCD + occupancy + coordinates fingerprint.
+
+    Copies with unchanged contents remain compatible. Grid changes require
+    explicit revalidation, never silently relax the default load identity.
+    """
+    descriptor, label, _ = _map_descriptor(directory)
+    return dict(frame_id='map', fingerprint=_descriptor_hash(descriptor), label=label)
+
+
+def _coordinate_descriptor(descriptor):
+    return {key: descriptor[key] for key in ('version', 'frame_id', 'pcd', 'geometry')}
+
+
+def map_geometry_identity(directory):
+    """Exact PCD bytes and coordinate metadata, excluding occupancy policy."""
+    descriptor, _, _ = _map_descriptor(directory)
+    return _descriptor_hash(_coordinate_descriptor(descriptor))
+
+
+def revalidate_route(route, previous_directory, current_directory):
+    """Explicitly copy a route across a grid-only rebuild after full proof.
+
+    The previous complete cached map must match the stored v1 fingerprint.
+    The new map must retain identical PCD bytes and coordinate metadata, and
+    every saved target must be a known-free cell in the new occupancy grid.
+    This never moves a goal, writes files, loads a queue, or enables motion.
+    It proves target-cell validity only, not path connectivity or clearance.
+    """
+    from grid_io import read_pgm
+
+    previous, old_label, _ = _map_descriptor(previous_directory)
+    document = validate_route(route, expected_map=dict(frame_id='map',
+        fingerprint=_descriptor_hash(previous), label=old_label))
+    current, new_label, nav = _map_descriptor(current_directory)
+    if _descriptor_hash(_coordinate_descriptor(previous)) != _descriptor_hash(_coordinate_descriptor(current)):
+        raise ValueError('Route revalidation refused: PCD or map coordinate metadata changed; original goal coordinates cannot be reused')
+    directory = Path(current_directory).resolve(strict=True)
+    if nav.get('mode', 'trinary') != 'trinary' or nav.get('negate', 0) not in (0, 1):
+        raise ValueError('Route revalidation requires a trinary navigation grid with negate 0/1')
+    resolution = _number(nav.get('resolution'))
+    origin = _vector(nav.get('origin'), 3)
+    free_threshold = _number(nav.get('free_thresh'))
+    occupied_threshold = _number(nav.get('occupied_thresh'))
+    if resolution <= 0 or not 0 < free_threshold < occupied_threshold <= 1:
+        raise ValueError('Invalid navigation grid resolution or occupancy thresholds')
+    pixels = read_pgm(_map_file(directory, nav['image']))
+    height, width = pixels.shape
+    c, s = math.cos(origin[2]), math.sin(origin[2])
+    failures = []
+    for number, point in enumerate(document['waypoints'], 1):
+        x, y, _ = point['position']
+        dx, dy = x-origin[0], y-origin[1]
+        gx = (c*dx+s*dy)/resolution
+        gy = (-s*dx+c*dy)/resolution
+        if not math.isfinite(gx) or not math.isfinite(gy):
+            failures.append(f'#{number} invalid grid coordinates')
+            continue
+        ix, iy = math.floor(gx), math.floor(gy)
+        if not (0 <= ix < width and 0 <= iy < height):
+            failures.append(f'#{number} ({x:.3f},{y:.3f}) outside new map')
+            continue
+        pixel = int(pixels[height-1-iy, ix])
+        occupancy = (pixel if nav.get('negate', 0) else 255-pixel)/255.
+        if not occupancy < free_threshold:
+            state = 'occupied' if occupancy > occupied_threshold else 'unknown'
+            failures.append(f'#{number} ({x:.3f},{y:.3f}) {state}, pixel={pixel}')
+    if failures:
+        raise ValueError('Route revalidation failed: '+'; '.join(failures))
+    document['map'] = dict(frame_id='map', fingerprint=_descriptor_hash(current), label=new_label)
+    return validate_route(document)
 
 
 def _unique_object(pairs):

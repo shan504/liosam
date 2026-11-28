@@ -92,7 +92,7 @@ def ground_alignment(points, model, body_height=None):
     return transform, aligned, body_height
 
 
-def body_seed_position(position, model=None, body_height=None):
+def body_seed_position(position, model=None, body_height=None, terrain=None):
     """Lift a conventional z=0 2D initialpose to standing body height.
 
     Legacy maps without a saved body-height contract and explicit nonzero Z
@@ -108,12 +108,31 @@ def body_seed_position(position, model=None, body_height=None):
             plane[2] < 0.9 or not np.isclose(np.linalg.norm(plane[:3]),1.,atol=1e-5) or
             not np.isfinite(body_height) or not 0.1 < body_height < 1.0):
         raise ValueError('Invalid saved standing height/ground plane')
-    result[2] = (body_height-plane[3]-plane[:2]@result[:2])/plane[2]
+    if terrain is not None:
+        ground_z, supported = terrain.height_at(result[None, :2])
+        if not supported[0]:
+            raise ValueError('Initial pose has no observed local terrain support; choose a surveyed road position')
+        result[2] = float(ground_z[0]) + body_height
+    else:
+        result[2] = (body_height-plane[3]-plane[:2]@result[:2])/plane[2]
     return result
 
 
 def floor_and_obstacles(points, model, min_height=0.10, max_height=1.5):
+    terrain = model.get('_terrain')
+    if terrain is not None:
+        # Local terrain is a classification reference only; XYZ stays in the
+        # saved map frame for GICP, TF, goals and the occupancy grid.
+        h, supported = terrain.evaluate(points)
+        finite = np.isfinite(points).all(axis=1)
+        floor = points[finite & supported & (np.abs(h) <= 0.035)]
+        # Unsupported surfaces cannot become observed free space. Significant
+        # returns below the supported surface are retained as drop hazards.
+        obstacle = (~supported | ((h >= min_height) & (h <= max_height)) |
+                    (h <= -min_height))
+        return floor, points[finite & obstacle]
     h = heights(points,model)
     floor = points[np.abs(h)<=0.035]
     obstacles = points[(h>=min_height)&(h<=max_height)]
     return floor,obstacles
+

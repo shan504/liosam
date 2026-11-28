@@ -77,6 +77,10 @@ class Operator(Node):
         # Preserve click order while a stamped odom click waits briefly for
         # TF callbacks. These inputs are not executable waypoints yet.
         self.goal_inputs = deque()
+        self.waypoint_edit = None
+        # Track SetParameters acknowledgements separately from GetParameters.
+        # A pending enable may otherwise arrive after an edit was armed.
+        self.motion_requests = []
         # Reusable plan history is separate from the execution queue. It can
         # be saved after completion/cancel, but never authorizes resuming it.
         self.planned_route = []
@@ -167,6 +171,7 @@ class Operator(Node):
         entries = ([self.inflight_waypoint] if self.inflight_waypoint else []) + list(self.waypoints)
         for number,pose in entries:
             active = self.inflight_waypoint is not None and number == self.inflight_waypoint[0]
+            status = self.map_waypoint_info(number,pose,active)
             marker = Marker(id=number,ns='waypoints',type=Marker.SPHERE,action=Marker.ADD)
             marker.header.frame_id = 'map'
             marker.pose = copy.deepcopy(pose.pose)
@@ -175,12 +180,16 @@ class Operator(Node):
             marker.pose.orientation.w = 1.0
             marker.scale.x = marker.scale.y = marker.scale.z = 0.12
             marker.color.a = 1.0
-            marker.color.r = 1.0 if active or self.route_paused else 0.1
-            marker.color.g = 0.5 if active else 0.1 if self.route_paused else 0.9
-            marker.color.b = 0.1
+            color = ((1.0,0.5,0.1) if active else
+                     (0.9,0.1,0.1) if status['status'] in ('occupied','clearance') else
+                     (0.1,0.9,0.1) if status['status'] == 'free' else (0.55,0.55,0.55))
+            marker.color.r,marker.color.g,marker.color.b = color
             markers.append(marker)
             label = copy.deepcopy(marker)
-            label.ns, label.type, label.text = 'waypoint_numbers',Marker.TEXT_VIEW_FACING,str(number)
+            suffix = (' EDIT' if self.waypoint_edit == number else
+                      ' BLOCKED' if status['status'] in ('occupied','clearance') else
+                      ' ?' if status['status'] != 'free' else '')
+            label.ns, label.type, label.text = 'waypoint_numbers',Marker.TEXT_VIEW_FACING,str(number)+suffix
             label.pose.position.z = 0.32
             label.scale.z = 0.18
             markers.append(label)
@@ -583,6 +592,9 @@ class Operator(Node):
         if message.data and self.goal_inputs:
             self.report('Enable deferred: 目标正在等待坐标转换，请等航点编号出现后再启用运动')
             return
+        if message.data and self.waypoint_edit is not None:
+            self.report(f'Enable rejected: 正在替换航点 #{self.waypoint_edit}，请先在 Foxglove 重新选点')
+            return
         if not automatic:
             self.clear_auto_resume('manual enable' if message.data else 'manual disable')
             if message.data:
@@ -611,6 +623,14 @@ class Operator(Node):
                 self.clear_auto_resume()
             self.report(f'Enable rejected: Nav2 NavigateToPose action unavailable; {self.startup_status}')
             return
+        if enabled and start_route:
+            try:
+                self.preflight_waypoints()
+            except ValueError as error:
+                if automatic:
+                    self.clear_auto_resume('static waypoint preflight failed')
+                self.report(f'Enable rejected: {error}; 路线保留，使用 routes.sh check / replace 编号修正')
+                return
         if not self.parameters.service_is_ready():
             if automatic:
                 self.clear_auto_resume()
@@ -619,7 +639,9 @@ class Operator(Node):
         request = SetParameters.Request()
         request.parameters = [Parameter('enable_control',value=bool(message.data)).to_parameter_msg()]
         future = self.parameters.call_async(request)
+        self.motion_requests.append(future)
         def done(result):
+            self.motion_requests[:] = [pending for pending in self.motion_requests if pending is not result]
             if generation != self.motion_generation or route_generation != self.goal_generation:
                 return
             if automatic and self.auto_resume is not intent:
@@ -635,6 +657,15 @@ class Operator(Node):
                 elif start_route and self.waiting_goal is not None:
                     if not self.localized():
                         self.pause_for_localization()
+                        return
+                    try:
+                        self.preflight_waypoints()
+                    except ValueError as error:
+                        self.clear_auto_resume('static waypoint preflight failed')
+                        self.route_started = False
+                        self.route_paused = True
+                        self.route_pause_reason = 'validation'
+                        self.report(f'Route start rejected: {error}; 路线保留，请修正标红航点')
                         return
                     if automatic:
                         try:
@@ -696,11 +727,19 @@ class Operator(Node):
 
     def on_resume(self,message):
         self.clear_auto_resume('manual resume')
+        if self.waypoint_edit is not None or self.goal_inputs or self.motion_requests or self.pause_disable_future is not None:
+            self.report('Resume rejected: 航点替换、坐标转换或运动控制回执尚未完成')
+            return
         if not self.route_paused or not self.waypoints:
             self.report('No paused waypoint route to resume')
             return
         if not self.localized():
             self.report('Resume rejected: live GICP localization required')
+            return
+        try:
+            self.preflight_waypoints()
+        except ValueError as error:
+            self.report(f'Resume rejected: {error}; 路线保留，使用 routes.sh replace 编号重新选点')
             return
         self.route_paused = False
         self.route_pause_reason = None
@@ -720,6 +759,106 @@ class Operator(Node):
     def stored_waypoint(message):
         p,q = message.pose.position,message.pose.orientation
         return dict(position=[p.x,p.y,p.z],orientation=[q.x,q.y,q.z,q.w])
+
+    def map_waypoint_info(self,number,message,active=False):
+        p = message.pose.position
+        xyz = [float(p.x),float(p.y),float(p.z)]
+        info = dict(number=number,x=xyz[0],y=xyz[1],z=xyz[2],active=bool(active),
+                    status='unavailable',value=None,cell=None,message='/map 尚未收到')
+        if not all(math.isfinite(value) for value in xyz):
+            info.update(x=None,y=None,z=None,status='invalid',message='目标坐标无效')
+            return info
+        sample = self.grids.get('/map')
+        if sample is None:
+            return info
+        grid,_ = sample
+        try:
+            if (message.header.frame_id != 'map' or grid.header.frame_id != 'map' or
+                    not math.isfinite(grid.info.resolution) or grid.info.resolution <= 0 or
+                    grid.info.width <= 0 or grid.info.height <= 0 or
+                    len(grid.data) != grid.info.width*grid.info.height):
+                raise ValueError('/map 栅格或目标坐标系无效')
+            index = grid_cell(grid,xyz[:2])
+            if index is None:
+                info.update(status='outside',message='目标在 /map 范围外')
+                return info
+            value = int(grid.data[index[1]*grid.info.width+index[0]])
+            status = ('unknown' if value == -1 else 'occupied' if value == 100 else
+                      'clearance' if value == 99 else 'free' if 0 <= value < 99 else 'invalid')
+            info.update(status=status,value=value,cell=list(index),message={
+                'unknown':'目标在未知格', 'occupied':'目标格被地图标为障碍',
+                'clearance':'目标格在障碍安全边界内', 'free':'静态目标格可用，路径尚需 Nav2 规划',
+                'invalid':'/map 格值无效'}[status])
+        except (ValueError,TypeError,OverflowError) as error:
+            info.update(status='invalid',message=str(error))
+        return info
+
+    def waypoint_queue_info(self):
+        entries = ([self.inflight_waypoint] if self.inflight_waypoint else []) + list(self.waypoints)
+        current = self.inflight_waypoint[0] if self.inflight_waypoint else None
+        return dict(current=current,completed=self.completed_waypoints,queued=len(self.waypoints),
+                    paused=self.route_paused,started=self.route_started,editing=self.waypoint_edit,
+                    entries=[self.map_waypoint_info(number,pose,number==current) for number,pose in entries])
+
+    def preflight_waypoints(self,entries=None):
+        """Check every remaining static target before enabling, not just point 1.
+
+        This does not prove path connectivity or replace dispatch-time checks
+        of the live global/local costmaps and the robot footprint.
+        """
+        entries = list(self.waypoints) if entries is None else list(entries)
+        checks = [self.map_waypoint_info(number,pose) for number,pose in entries]
+        bad = [item for item in checks if item['status'] != 'free']
+        if bad:
+            details = []
+            for item in bad:
+                xy = ('invalid' if item['x'] is None else f'{item["x"]:.2f},{item["y"]:.2f}')
+                details.append(f'#{item["number"]} ({xy}) {item["message"]}; '
+                               f'/map value={item["value"]} cell={item["cell"]}')
+            raise ValueError('路线静态目标检查失败：'+' | '.join(details))
+        return checks
+
+    def ensure_waypoint_editable(self):
+        if (self.route_started or self.inflight_waypoint is not None or
+                self.goal_handle is not None or self.goal_pending or self.cancelling or
+                self.enable_query is not None or self.pause_disable_future is not None or
+                self.motion_requests or self.auto_resume is not None or self.active_dispatch is not None):
+            raise ValueError('路线仍在执行或等待控制回执；只可替换尚未开始或已暂停的待执行航点')
+
+    def arm_waypoint_replace(self,number):
+        if type(number) is not int or number <= 0:
+            raise ValueError('replace number 必须是正整数航点编号')
+        if self.goal_inputs:
+            raise ValueError('已有目标正在等待坐标转换，请稍后再替换')
+        self.ensure_waypoint_editable()
+        if not any(existing == number for existing,_ in self.waypoints):
+            raise ValueError(f'航点 #{number} 不在待执行队列；不能替换已完成或正在执行的点')
+        if number > len(self.planned_route):
+            raise ValueError('完整路线历史不可用，无法安全同步替换与保存')
+        self.clear_auto_resume('manual waypoint replacement')
+        self.goal_generation += 1
+        self.motion_generation += 1
+        self.waypoint_edit = number
+        self.report(f'准备替换航点 #{number}：在 Foxglove 设置一个新目标；其余点位保留，替换后不会自动运动')
+
+    def replace_queued_waypoint(self,number,message):
+        if self.waypoint_edit != number:
+            raise ValueError('航点替换已被撤销；本次点击不会追加到队列')
+        self.ensure_waypoint_editable()
+        self.preflight_waypoints([(number,message)])
+        if not any(existing == number for existing,_ in self.waypoints) or number > len(self.planned_route):
+            raise ValueError('待替换航点或完整历史已改变；请重新选择替换编号')
+        updated = deque((existing,copy.deepcopy(message) if existing == number else pose)
+                        for existing,pose in self.waypoints)
+        history = copy.deepcopy(self.planned_route)
+        history[number-1] = self.stored_waypoint(message)
+        self.goal_generation += 1
+        self.motion_generation += 1
+        self.waypoints,self.planned_route = updated,history
+        self.waypoint_edit = None
+        self.reset_dispatch_wait()
+        self.report(f'已原位替换航点 #{number}；其余点位和完成记录保留。'
+                    '请先 routes.sh check，暂停路线点“重试暂停路线”，未开始路线点“启用运动”')
 
     def on_route_command(self,message):
         """Atomically import a local-file plan, or snapshot its full history.
@@ -749,17 +888,25 @@ class Operator(Node):
                 self.route_results.publish(String(data=previous[1]))
                 return
             command = request.get('command')
-            if command not in ('snapshot','load','run'):
-                raise ValueError('Route command must be snapshot, load or run')
-            allowed = {'request_id','command'} | ({'route'} if command != 'snapshot' else set())
+            if command not in ('snapshot','load','run','check','replace'):
+                raise ValueError('Route command must be snapshot, load, run, check or replace')
+            allowed = {'request_id','command'} | ({'route'} if command in ('load','run') else
+                                                  {'number'} if command == 'replace' else set())
             if set(request) != allowed:
                 raise ValueError('Unexpected or missing route command fields')
             if self.mode != 'navigation':
                 raise ValueError('Route commands require navigation mode')
-            if self.route_map is None:
+            if self.route_map is None and command not in ('check','replace'):
                 raise ValueError('Running map identity unavailable; restart navigation with a prepared map: '+self.route_map_error)
-            if command == 'snapshot':
-                if self.goal_inputs:
+            if command == 'check':
+                result = dict(request_id=request_id,success=True,queue=self.waypoint_queue_info(),
+                              message='仅检查 /map 目标格；不代表路径可达，不改变队列和运动')
+            elif command == 'replace':
+                self.arm_waypoint_replace(request['number'])
+                result = dict(request_id=request_id,success=True,editing=self.waypoint_edit,
+                              message=f'请在 Foxglove 重新设置航点 #{self.waypoint_edit}；只替换该点，不自动开始')
+            elif command == 'snapshot':
+                if self.goal_inputs or self.waypoint_edit is not None:
                     raise ValueError('目标坐标转换尚未完成，请稍后保存路线')
                 if self.planned_route_overflow:
                     raise ValueError('Complete route exceeds the 100-point file limit; no partial route was saved')
@@ -768,7 +915,8 @@ class Operator(Node):
                 result = dict(request_id=request_id,success=True,
                     message=f'Full route snapshot: {len(route["waypoints"])} points; motion unchanged',route=route)
             else:
-                if (self.goal_inputs or self.waypoints or self.inflight_waypoint is not None or
+                if (self.goal_inputs or self.waypoint_edit is not None or self.motion_requests or
+                        self.waypoints or self.inflight_waypoint is not None or
                         self.goal_handle is not None or self.goal_pending or self.cancelling or
                         self.route_paused or self.route_started or
                         self.enable_query is not None or self.pause_disable_future is not None or
@@ -787,6 +935,7 @@ class Operator(Node):
                     self.validate_map_goal(pose,require_free=False)
                     poses.append(pose)
                 if command == 'run':
+                    self.preflight_waypoints(enumerate(poses,1))
                     if not self.localized():
                         raise ValueError('Run requires live GICP localization; load the route without running if localization is pending')
                     if not self.action.server_is_ready() or not self.parameters.service_is_ready():
@@ -828,6 +977,10 @@ class Operator(Node):
         if self.action is None:
             self.report('Goal rejected: navigation mode required')
             return
+        replacement = self.waypoint_edit
+        if replacement is not None and self.goal_inputs:
+            self.report('Goal rejected: 替换目标正在等待坐标转换，请等待后再重新点选')
+            return
         try:
             frame = goal_frame(message.header.frame_id)
             p,q = message.pose.position,message.pose.orientation
@@ -839,7 +992,7 @@ class Operator(Node):
         except (ValueError,TypeError) as error:
             self.report(f'Goal rejected: {error}')
             return
-        if len(self.goal_inputs)+len(self.waypoints)+int(self.inflight_waypoint is not None) >= 100:
+        if replacement is None and len(self.goal_inputs)+len(self.waypoints)+int(self.inflight_waypoint is not None) >= 100:
             self.report('Goal rejected: waypoint queue limit is 100 (including pending frame conversions)')
             return
         if self.cancelling or (self.goal_pending and self.cancel_requested):
@@ -849,12 +1002,14 @@ class Operator(Node):
         self.clear_auto_resume('new waypoint')
         message = copy.deepcopy(message)
         message.header.frame_id = frame
-        self.goal_inputs.append(dict(message=message,received=time.monotonic(),reported=False))
+        self.goal_inputs.append(dict(message=message,received=time.monotonic(),reported=False,
+                                     replace_number=replacement))
         self.process_goal_inputs()
 
     def discard_goal_inputs(self, reason):
         count = len(self.goal_inputs)
         self.goal_inputs.clear()
+        self.waypoint_edit = None
         if count:
             self.report(f'已取消 {count} 个等待坐标转换的目标：{reason}')
 
@@ -892,10 +1047,16 @@ class Operator(Node):
                     continue
                 self.report('目标已按真实 TF 从 odom 转换到 map')
             self.goal_inputs.popleft()
-            self.queue_map_goal(message)
+            self.queue_map_goal(message,replace_number=pending.get('replace_number'))
 
-    def queue_map_goal(self,message):
+    def queue_map_goal(self,message,replace_number=None):
         """Existing map/grid/enable checks, after optional input conversion."""
+        if replace_number is not None:
+            try:
+                self.replace_queued_waypoint(replace_number,message)
+            except (ValueError,TransformException) as error:
+                self.report(f'Waypoint replacement rejected: {error}; 原航点保留，请重新选点')
+            return
         try:
             p,q = message.pose.position,message.pose.orientation
             pose_matrix([p.x,p.y,p.z],[q.x,q.y,q.z,q.w])
@@ -929,7 +1090,8 @@ class Operator(Node):
             self.planned_route.append(self.stored_waypoint(message))
         else:
             self.planned_route_overflow = True
-        notice = (f'; queued; execution requires a free goal cell (/map value={map_value})'
+        notice = (f'; BLOCKED/UNKNOWN: queued; execution requires a free goal cell (/map value={map_value}); '
+                  f'使用 routes.sh replace {self.waypoint_number} 后重新选点'
                   if map_value < 0 or map_value >= 99 else '')
         self.report(f'Waypoint #{self.waypoint_number} appended at ({message.pose.position.x:.2f}, {message.pose.position.y:.2f}){notice}')
         if not self.localized():

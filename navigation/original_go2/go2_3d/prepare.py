@@ -56,9 +56,20 @@ def main(mode='mapping'):
         params['denoise_layer'] = {'plugin':'nav2_costmap_2d::DenoiseLayer',
                                   'enabled':True, **settings()}
         params['static_layer'] = {'plugin':'nav2_costmap_2d::StaticLayer', 'map_subscribe_transient_local':True}
+        # obstacle_cloud.py already selects physical obstacles relative to the
+        # local terrain. Humble filters Z again after transforming into the
+        # costmap's global frame, both in ObservationBuffer and ObstacleLayer:
+        # navigation2/humble/nav2_costmap_2d/src/observation_buffer.cpp
+        # navigation2/humble/nav2_costmap_2d/plugins/obstacle_layer.cpp
+        # A fixed 0..2m global-Z band loses obstacles on uphill/downhill terrain.
+        # Admit every finite global Z in these two downstream gates; the shared
+        # terrain-relative physical height limits above remain unchanged.
+        absolute_z = sys.float_info.max
         params['obstacle_layer'] = {'plugin':'nav2_costmap_2d::ObstacleLayer',
+            'min_obstacle_height':-absolute_z,'max_obstacle_height':absolute_z,
             'observation_sources':'scan', 'scan':{'topic':'/scan','data_type':'LaserScan',
-            'clearing':True,'marking':True,'inf_is_valid':False,'max_obstacle_height':2.0,
+            'clearing':True,'marking':True,'inf_is_valid':False,
+            'min_obstacle_height':-absolute_z,'max_obstacle_height':absolute_z,
             'raytrace_min_range':0.35,'raytrace_max_range':15.0,
             'obstacle_min_range':0.35,'obstacle_max_range':12.0}}
         params['inflation_layer'] = {'plugin':'nav2_costmap_2d::InflationLayer',
@@ -107,3 +118,4 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', choices=('mapping', 'localization', 'navigation'), default='mapping')
     main(parser.parse_args().mode)
+

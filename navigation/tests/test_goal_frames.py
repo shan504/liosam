@@ -119,6 +119,8 @@ class GoalQueue(unittest.TestCase):
         op.mode='navigation'
         op.auto_resume=None
         op.goal_inputs=deque()
+        op.waypoint_edit=None
+        op.motion_requests=[]
         op.waypoints=deque()
         op.inflight_waypoint=op.goal_handle=op.enable_query=None
         op.goal_pending=op.cancel_requested=op.cancelling=False

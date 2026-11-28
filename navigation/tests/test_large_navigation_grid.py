@@ -44,10 +44,9 @@ def archive(root, name, lower, extent, aligned):
     ground_to_saved = (np.eye(4) if aligned else
                        rigid([0., 0., -.37],
                              [math.sin(tilt / 2), 0., 0., math.cos(tilt / 2)]))
-    body = rigid([lower[0] + 1., lower[1] + 1., .37],
+    body = rigid([lower[0] + .15, lower[1] + .15, .37],
                  [0., 0., math.sin(.19), math.cos(.19)])
     mount = rigid([.215, 0., .25], [0., math.sin(.25), 0., math.cos(.25)])
-    lidar = ground_to_saved @ body @ mount
     scan = np.column_stack((apply(level, ground_to_saved),
                             np.arange(len(level)))).astype('<f4')
     points = np.tile(scan, (2, 1))
@@ -71,10 +70,16 @@ def archive(root, name, lower, extent, aligned):
     with (source / 'poses.csv').open('w', newline='') as stream:
         writer = csv.writer(stream)
         writer.writerow(['stamp_ns', 'x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'])
-        writer.writerow([10, *lidar[:3, 3], *quaternion(lidar[:3, :3])])
+        # Sparse observations comprise four disconnected patches; the logged
+        # robot visited each patch, providing an independent terrain anchor.
+        for index, corner in enumerate(corners):
+            patch_body = body.copy()
+            patch_body[:2, 3] = corner + .15
+            lidar = ground_to_saved @ patch_body @ mount
+            writer.writerow([10+10*index, *lidar[:3, 3], *quaternion(lidar[:3, :3])])
     (source / 'scans.csv').write_text(
         'stamp_ns,anchor_stamp_ns,first_point_index,point_count\n'
-        f'10,10,0,{len(scan)}\n20,10,{len(scan)},{len(scan)}\n')
+        f'10,10,0,{len(scan)}\n40,40,{len(scan)},{len(scan)}\n')
     return source, level, body
 
 

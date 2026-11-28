@@ -26,6 +26,7 @@ from map_library import map_name, validate_bundle
 from map_start import validate_start_pose
 from mapping_store import _keys
 from navigation_grid import current_settings
+from terrain import build_terrain, load_terrain
 
 
 class Progress:
@@ -49,7 +50,7 @@ def cache_key(version, inputs):
     # The container always sees /map_source. Include actual per-version input
     # identities and the original grid policy used to generate the cached map.
     for path in [Path(__file__), HERE / 'prepare_map.py',
-                 *[GO2 / p for p in ('geometry.py', 'grid_io.py', 'ground.py', 'denoise.py',
+                 *[GO2 / p for p in ('geometry.py', 'grid_io.py', 'ground.py', 'terrain.py', 'denoise.py',
                                      'free_space.py', 'navigation_grid.py',
                                      'navigation_grid.yaml', 'navigation_filter.yaml', 'map_start.py',
                                      'mapping_store.py', 'gicp_dense.yaml')]]:
@@ -75,6 +76,12 @@ def export_grid(chunks, grid, directory, policy, model):
     floor_once = set()
     occupied = {}
     low, high = policy['obstacle_min_height'], policy['obstacle_max_height']
+    terrain = model.get('_terrain')
+    if terrain is not None:
+        # A ray above a slope/gap proves line of sight, not ground support.
+        # A fitted 0.4m terrain cell also cannot prove all of its 5cm pixels
+        # contain ground. Rebuild free evidence from real floor endpoints below.
+        grid.free = set()
     for cloud in chunks:
         xyz = cloud[:, :3]
         floor, obstacles = floor_and_obstacles(xyz, model, low, high)
@@ -96,6 +103,12 @@ def export_grid(chunks, grid, directory, policy, model):
           file=sys.stderr, flush=True)
     samples = np.asarray(list(occupied.values()), dtype=np.float32).reshape(-1, 3)
     grid.export(samples, directory, floor_z=0., min_height=low, max_height=high, ground_model=model)
+
+
+def observed_free_support(grid, xy):
+    """Query fine observed-floor evidence, never the entire terrain-fit cell."""
+    cells = np.floor(np.asarray(xy, dtype=float) / grid.resolution).astype(np.int64)
+    return np.fromiter((tuple(cell) in grid.free for cell in cells), dtype=bool, count=len(cells))
 
 
 def accumulate_voxels(db, points, resolution):
@@ -162,6 +175,25 @@ def aligned_chunks(raw, transform, db, voxel):
         progress.report(min(offset+len(points), len(raw)))
 
 
+def voxel_chunks(db):
+    """Stream real averaged XYZ from the existing disk index, without a full copy."""
+    cursor = db.execute('SELECT sx/hits,sy/hits,sz/hits FROM voxels ORDER BY x,y,z')
+    while True:
+        rows = cursor.fetchmany(65536)
+        if not rows:
+            return
+        yield np.asarray(rows, dtype=np.float64)
+
+
+def classification_chunks(raw, transform):
+    progress = Progress('按局部地形分类原始回波', len(raw))
+    for offset in range(0, len(raw), 131072):
+        values = np.array(raw[offset:offset+131072], copy=True)
+        values[:, :3] = apply(values, transform)
+        yield values
+        progress.report(min(offset+len(values), len(raw)))
+
+
 def trace_archive(version, dest, manifest, files):
     source = manifest['dense']['frame_id'].strip('/')
     ground, mount, sensor = transforms(version, source)
@@ -216,9 +248,12 @@ def trace_archive(version, dest, manifest, files):
     if not np.isfinite(voxel) or voxel <= 0.:
         raise ValueError('原 Go2 dense 的体素尺寸无效')
     model = dict(plane=[0., 0., 1., 0.], height_at_origin=0.)
-    # This temporary on-disk index bounds RAM independently of occupied 3D
-    # voxel count. The old grid receives *all* original endpoints, never the
-    # voxel centers. The disposable DB lives outside the published bundle.
+    # Full localization voxels and raw navigation endpoints stay unchanged.
+    # Terrain is fitted to supported local surfaces using the optimized body
+    # trajectory, then every original endpoint is classified against it.
+    inverse_mount = np.linalg.inv(mount)
+    anchors = np.asarray([(pose @ inverse_mount)[:3, 3] for pose in keyframes.values()])
+    anchors[:, 2] -= body_height
     with tempfile.TemporaryDirectory(dir=dest.parent, prefix='voxels-') as tmp:
         with closing(sqlite3.connect(Path(tmp)/'map.sqlite')) as db:
             db.execute('PRAGMA journal_mode=OFF')
@@ -226,14 +261,29 @@ def trace_archive(version, dest, manifest, files):
             db.execute('PRAGMA cache_size=-32768')
             db.execute('CREATE TABLE voxels (x INTEGER,y INTEGER,z INTEGER,sx REAL,sy REAL,'
                        'sz REAL,si REAL,hits INTEGER,ni INTEGER, PRIMARY KEY(x,y,z)) WITHOUT ROWID')
-            export_grid(aligned_chunks(raw, ground, db, voxel), grid, dest, policy, model)
+            for _ in aligned_chunks(raw, ground, db, voxel):
+                pass
+            print('正在从局部点云和优化轨迹建立地形高程（不使用统一地面高度）……',
+                  file=sys.stderr, flush=True)
+            terrain = build_terrain(voxel_chunks(db), anchors, work_directory=Path(tmp),
+                                    progress=lambda stage, count: print(
+                                        f'局部地形：{stage} {count:,}', file=sys.stderr, flush=True))
+            statistics = terrain.statistics
+            print(f'局部地形完成：支持 {statistics["supported_cells"]:,}/'
+                  f'{statistics["candidate_cells"]:,} 个候选格；'
+                  f'台阶/不连续边界 {statistics["discontinuity_cells"]:,} 格保守保留。',
+                  file=sys.stderr, flush=True)
+            terrain_metadata = terrain.save(dest/'terrain.npz')
+            export_grid(classification_chunks(raw, ground), grid, dest, policy,
+                        dict(model, _terrain=terrain))
             retained = write_voxel_map(db, dest/'map.pcd', voxel)
     print('正在按原规则去除导航栅格孤立噪点……', file=sys.stderr, flush=True)
-    report = clean_directory(dest)
+    report = clean_directory(dest, free_support=lambda xy: observed_free_support(grid, xy))
     name = map_name(manifest.get('name', Path(files[0]).stem))
     metadata = dict(frame_id='map', map_type='lio_sam', point_count=retained, source_point_count=n,
                     ground_aligned=True,
                     body_height_above_ground=body_height, ground_model=model,
+                    terrain_model=terrain_metadata,
                     map_start_pose=start_pose.tolist(), map_from_source_map=ground.tolist(),
                     body_from_lidar=mount.tolist(), sensor_frame=sensor, source_frame=source,
                     parameters=dict(policy, map_name=name, floor_z=0., map_voxel_size=voxel), free_area_version=2,
@@ -260,6 +310,9 @@ def prepare(version, cache):
         fcntl.flock(lock, fcntl.LOCK_EX)
         if output.exists():
             validate_bundle(output)
+            metadata = yaml.safe_load((output/'metadata.yaml').read_text())
+            if load_terrain(output, metadata) is None:
+                raise ValueError(f'导航缓存缺少局部地形模型: {output}')
             if not (output / 'observed_free.npz').is_file():
                 raise ValueError(f'导航缓存缺少通行区域文件: {output}')
             print(f'复用已完成的导航地图缓存：{output.name}', file=sys.stderr, flush=True)
@@ -271,6 +324,7 @@ def prepare(version, cache):
             stage.mkdir()
             trace_archive(version, stage, manifest, files)
             validate_bundle(stage)
+            load_terrain(stage, yaml.safe_load((stage/'metadata.yaml').read_text()))
             stage.rename(output)
     return output
 

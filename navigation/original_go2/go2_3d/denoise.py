@@ -90,7 +90,7 @@ def clean_image(image, config=None):
                        **config)
 
 
-def clean_directory(directory, config=None):
+def clean_directory(directory, config=None, free_support=None):
     """Filter fixed-size tiles against an immutable disk-backed source image.
 
     A component with at least ``minimum`` cells has at least that many cells
@@ -116,7 +116,7 @@ def clean_directory(directory, config=None):
     height, width = image.shape
     lower = np.rint(np.asarray(nav['origin'][:2])/nav['resolution']).astype(np.int64)
     halo = minimum-1
-    removed_cells = removed_groups = retained = 0
+    removed_cells = removed_groups = retained = unsupported_free = 0
     last_report = time.monotonic()
     clean = None
     try:
@@ -135,6 +135,15 @@ def clean_directory(directory, config=None):
                                                        minimum, connectivity, _core=core)
                     block = np.array(image[y0:y1, x0:x1], copy=True)
                     block[remove[core]] = 254
+                    if free_support is not None:
+                        rows, cols = np.nonzero(block >= 250)
+                        xy = np.column_stack((cols+x0+lower[0]+.5,
+                                              height-1-(rows+y0)+lower[1]+.5)) * nav['resolution']
+                        supported = np.asarray(free_support(xy), dtype=bool)
+                        if supported.shape != rows.shape:
+                            raise ValueError('Terrain support must match queried free cells')
+                        block[rows[~supported], cols[~supported]] = 205
+                        unsupported_free += int(np.count_nonzero(~supported))
                     clean[y0:y1, x0:x1] = block
                     removed_cells += int(np.count_nonzero(remove[core]))
                     removed_groups += groups
@@ -156,5 +165,8 @@ def clean_directory(directory, config=None):
         if clean is not None:
             clean._mmap.close()
         image._mmap.close()
-    return dict(removed_cells=removed_cells, removed_groups=removed_groups,
-                retained_occupied_cells=retained, **config)
+    report = dict(removed_cells=removed_cells, removed_groups=removed_groups,
+                  retained_occupied_cells=retained, **config)
+    if free_support is not None:
+        report['unsupported_free_to_unknown'] = unsupported_free
+    return report
