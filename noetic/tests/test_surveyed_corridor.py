@@ -10,7 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from surveyed_corridor import (CorridorIndex, POLICY, make_document, read_document,
-                                validate_document, write_document)
+                                validate_document, write_document, index_from_document, ContinuousCorridorIndex)
 
 
 def pose(x=0., y=0., z=0., yaw=0., pitch=0., roll=0.):
@@ -145,6 +145,98 @@ class SurveyedCorridor(unittest.TestCase):
             list(index.free_cells(0.))
         with self.assertRaises(ValueError):
             list(index.free_cells(.1, pose(roll=math.pi/2)))
+
+
+class ContinuousCorridor(unittest.TestCase):
+    def document(self, poses, paths, ground=None):
+        ground = np.eye(4) if ground is None else ground
+        calibration = dict(map_from_source_map=ground.tolist(), body_from_lidar=pose(.215, 0., .25, pitch=math.pi/6).tolist(),
+                           source_frame='odom', body_height_above_ground=.37)
+        return make_document('odom', poses, paths=paths, calibration=calibration)
+
+    def test_sparse_forward_confirmations_form_one_whole_width_road_on_two_maps(self):
+        for name, origin, yaw in [('yard', (0., 0.), 0.), ('farm', (1800., -2300.), .7)]:
+            with self.subTest(map=name):
+                reference = pose(*origin, yaw=yaw)
+                path = [event(100+i*100, 100+i*100,
+                              reference @ pose(x, 0., .37+.05*x)) for i, x in enumerate(np.arange(0., 3.01, .5))]
+                document = self.document([path[0], path[-1]], [path])
+                index = index_from_document(document, np.eye(4))
+                xy = np.array([[x, y] for x in np.arange(.01, 3.99, .06) for y in (-.499, 0., .499)])
+                query = np.column_stack((xy, np.full(len(xy), 20.))) @ reference[:3, :3].T+reference[:3, 3]
+                self.assertTrue(index.contains(query).all())
+                outside = np.array([[1.5, .501, 0.], [2., -.501, 3.], [-.001, 0., 1.], [4.001, 0., 1.]])
+                outside = outside @ reference[:3, :3].T+reference[:3, 3]
+                self.assertFalse(index.contains(outside).any())
+                cells = union_cells(index, .05)
+                if yaw == 0.:
+                    self.assertEqual(cells, {(x,y) for x in range(80) for y in range(-10,10)})
+                # There is a connected band through every former event gap.
+                for x in np.arange(.1, 3.9, .05):
+                    point = reference[:2, 3]+x*reference[:2, 0]
+                    self.assertIn(tuple(np.floor(point/.05).astype(int)), cells)
+
+    def test_curve_follows_measured_waypoints_not_first_last_chord(self):
+        route = [pose(0.,0.,yaw=0.), pose(4.,0.,yaw=0.), pose(5.,1.,yaw=math.pi/2),
+                 pose(5.,4.,yaw=math.pi/2), pose(4.,5.,yaw=math.pi), pose(0.,5.,yaw=math.pi)]
+        path = [event(100+i*100,100+i*100,p) for i,p in enumerate(route)]
+        document = self.document([path[0],path[-1]], [path])
+        index = index_from_document(document,np.eye(4))
+        # A shortcut linking start/end would erase these actually untraversed points.
+        self.assertFalse(index.contains(np.array([[0.,2.5,1.],[2.5,2.5,4.],[2.,2.,-1.]])).any())
+        for first,last in zip(route,route[1:]):
+            xyz = np.array([first[:3,3]*(1-a)+last[:3,3]*a for a in np.linspace(.01,.99,20)])
+            self.assertTrue(index.contains(xyz).all())
+        cells = union_cells(index,.05)
+        for cell in cells:
+            corners = (np.array(cell)[None,:]+[[0,0],[1,0],[1,1],[0,1]])*.05
+            # Independent convex edge test; every exported pixel is wholly
+            # inside a real sweep polygon, not merely its bounding box.
+            covered = False
+            for polygon in index.polygons():
+                xy=polygon[:,:2]
+                d=np.roll(xy,-1,axis=0)-xy
+                v=corners[:,None,:]-xy[None,:,:]
+                crosses=d[None,:,0]*v[:,:,1]-d[None,:,1]*v[:,:,0]
+                if (crosses>=-1e-8).all():
+                    covered=True
+                    break
+            self.assertTrue(covered)
+
+    def test_tilted_source_and_explicit_discontinuities(self):
+        ground=pose(7.,-9.,.5,yaw=.3,pitch=math.pi/6,roll=-.2)
+        inverse=np.linalg.inv(ground)
+        bodies=[pose(0.,0.,.37),pose(3.,0.,.67),pose(10.,0.,.37),pose(13.,0.,.37)]
+        rows=[event(100+i*100,100+i*100,inverse@body) for i,body in enumerate(bodies)]
+        doc=self.document(rows, [rows[:2],rows[2:]], ground)
+        index=index_from_document(doc,ground)
+        query=np.array([[1.5,0.,-100.],[11.5,0.,100.],[7.,0.,.2],[1.5,.51,.2]])
+        np.testing.assert_array_equal(index.contains(query),[True,True,False,False])
+        with self.assertRaisesRegex(ValueError,'calibration differs'):
+            index_from_document(doc,np.eye(4))
+        # Legacy remains discrete and receives no inferred gap clearing.
+        old=make_document('odom',rows)
+        self.assertEqual(old['version'],1)
+        np.testing.assert_array_equal(index_from_document(old,ground).contains(query),False)
+
+    def test_document_rejects_unbounded_or_reordered_paths(self):
+        a,b,c=event(100,100,pose()),event(200,200,pose(1.,0.)),event(300,300,pose(3.,0.))
+        doc=self.document([a,c],[[a,b,c]])
+        self.assertEqual(validate_document(doc),doc)
+        import copy
+        for edit in (
+                lambda d:d.update(paths=[[b,c]]),
+                lambda d:d.update(paths=[[a,c,b]]),
+                lambda d:d.update(paths=[[a,c],[a,c]]),
+                lambda d:d.update(paths=[[]]),
+                lambda d:d['calibration'].update(body_height_above_ground=float('nan')),
+                lambda d:d['calibration'].update(source_frame='map')):
+            bad=copy.deepcopy(doc);edit(bad)
+            with self.assertRaises(ValueError):validate_document(bad)
+        with tempfile.TemporaryDirectory() as tmp:
+            target=Path(tmp)/'road.json'
+            write_document(target,'odom',[a,c],paths=[[a,b,c]],calibration=doc['calibration'])
+            self.assertEqual(read_document(target),doc)
 
 
 if __name__ == '__main__':

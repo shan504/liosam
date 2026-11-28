@@ -22,7 +22,8 @@ GO2 = HERE / 'original_go2' / 'go2_3d'
 NOETIC = HERE.parent / 'noetic'
 sys.path.insert(0, str(NOETIC))
 sys.path.insert(0, str(GO2))
-from surveyed_corridor import CorridorIndex, read_document
+from surveyed_corridor import index_from_document, read_document
+from corridor_reference import trajectory_reference
 from denoise import clean_directory
 from geometry import ObservedGrid
 from ground import floor_and_obstacles
@@ -53,7 +54,8 @@ def cache_key(version, inputs):
     digest = hashlib.sha256()
     # The container always sees /map_source. Include actual per-version input
     # identities and the original grid policy used to generate the cached map.
-    for path in [Path(__file__), HERE / 'prepare_map.py', NOETIC / 'surveyed_corridor.py',
+    for path in [Path(__file__), HERE / 'prepare_map.py', HERE / 'corridor_reference.py',
+                 NOETIC / 'surveyed_corridor.py',
                  *[GO2 / p for p in ('geometry.py', 'grid_io.py', 'ground.py', 'terrain.py', 'denoise.py',
                                      'free_space.py', 'navigation_grid.py',
                                      'navigation_grid.yaml', 'navigation_filter.yaml', 'map_start.py',
@@ -219,7 +221,7 @@ def survey_contract(version, manifest):
     document = read_document(version / filename,
                              expected_frame=manifest['dense']['frame_id'].strip('/'))
     names = [filename]
-    if document['poses']:
+    if document['version'] == 1 and document['poses']:
         terrain = document.get('terrain')
         if not isinstance(terrain, dict):
             raise ValueError('已清理通行带的地图缺少清理前地形模型')
@@ -259,24 +261,29 @@ def trace_archive(version, dest, manifest, files):
     grid = ObservedGrid(policy['grid_resolution'])
     surveyed_free = set()
     saved_terrain = None
+    corridor = None
+    continuous = survey is not None and survey['version'] == 2
     if survey is not None and survey['poses']:
-        contract = survey['terrain']
+        contract = survey['calibration'] if continuous else survey['terrain']
         for field, expected in [('map_from_source_map', ground), ('body_from_lidar', mount)]:
             actual = np.asarray(contract.get(field), dtype=float)
             if actual.shape != (4, 4) or not np.isfinite(actual).all() or not np.allclose(actual, expected, atol=1e-7, rtol=0):
-                raise ValueError('通行带地形标定与地图不一致：' + field)
+                raise ValueError('通行带标定与地图不一致：' + field)
         if (contract.get('source_frame') != source or
                 not np.isclose(float(contract.get('body_height_above_ground', float('nan'))),
                                body_height, atol=1e-6, rtol=0)):
-            raise ValueError('通行带地形的坐标系或机身高度与地图不一致')
-        saved_terrain = load_terrain(version, {'terrain_model': contract})
-        if saved_terrain is None:
-            raise ValueError('缺少清理前地形，不能把已删除的回波当作地面')
+            raise ValueError('通行带的坐标系或机身高度与地图不一致')
+        if not continuous:
+            saved_terrain = load_terrain(version, {'terrain_model': contract})
+            if saved_terrain is None:
+                raise ValueError('旧版通行带缺少清理前地形，请保留该地图的原始配套文件')
         # The source LIO frame may be tilted. Define the all-height rectangle
         # in the calibrated ground frame, with heading from the full body pose.
-        corridor = CorridorIndex([ground @ np.asarray(event['body_pose']) for event in survey['poses']])
+        corridor = index_from_document(survey, ground)
         for cells in corridor.free_cells(grid.resolution):
             surveyed_free.update(map(tuple, cells))
+    if continuous and not surveyed_free:
+        raise ValueError('本地图没有有效的前进通行带记录，不能生成连续通行栅格；请检查建图前进计数')
     n = len(raw)
     n_scans = first = exact = 0
     progress = Progress('恢复实测通行区域（扫描帧）', manifest['dense']['scans'])
@@ -321,7 +328,12 @@ def trace_archive(version, dest, manifest, files):
                        'sz REAL,si REAL,hits INTEGER,ni INTEGER, PRIMARY KEY(x,y,z)) WITHOUT ROWID')
             for _ in aligned_chunks(raw, ground, db, voxel):
                 pass
-            if saved_terrain is None:
+            if continuous:
+                print('正在从已记录机身轨迹生成道路高度参考（不拟合点云地形）……',
+                      file=sys.stderr, flush=True)
+                terrain = trajectory_reference(corridor, body_height, grid.resolution,
+                                               surveyed_free, start_pose=start_pose)
+            elif saved_terrain is None:
                 print('正在从局部点云和优化轨迹建立地形高程（不使用统一地面高度）……',
                       file=sys.stderr, flush=True)
                 terrain = build_terrain(voxel_chunks(db), anchors, work_directory=Path(tmp),
@@ -332,11 +344,17 @@ def trace_archive(version, dest, manifest, files):
                 print('复用本次建图清理前记录的局部地形；通行带作为单独人工确认信息。',
                       file=sys.stderr, flush=True)
             statistics = terrain.statistics
-            print(f'局部地形完成：支持 {statistics["supported_cells"]:,}/'
-                  f'{statistics["candidate_cells"]:,} 个候选格；'
-                  f'台阶/不连续边界 {statistics["discontinuity_cells"]:,} 格保守保留。',
-                  file=sys.stderr, flush=True)
-            terrain_metadata = terrain.save(dest/'terrain.npz')
+            if continuous:
+                print(f'轨迹道路参考完成：{statistics["supported_cells"]:,} 格；'
+                      f'交叉高度冲突 {statistics["discontinuity_cells"]:,} 格保留未知。'
+                      '只使用已记录机身高度和站立高度，不做点云地形拟合。',
+                      file=sys.stderr, flush=True)
+            else:
+                print(f'局部地形完成：支持 {statistics["supported_cells"]:,}/'
+                      f'{statistics["candidate_cells"]:,} 个候选格；'
+                      f'台阶/不连续边界 {statistics["discontinuity_cells"]:,} 格保守保留。',
+                      file=sys.stderr, flush=True)
+            terrain_metadata = terrain.save(dest/('road_reference.npz' if continuous else 'terrain.npz'))
             export_grid(classification_chunks(raw, ground), grid, dest, policy,
                         dict(model, _terrain=terrain), surveyed_free=surveyed_free)
             retained = write_voxel_map(db, dest/'map.pcd', voxel)

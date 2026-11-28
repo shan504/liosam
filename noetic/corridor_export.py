@@ -1,8 +1,7 @@
-"""Freeze surveyed mapping corridors and preserve pre-clearance terrain evidence."""
+"""Freeze continuous surveyed corridors without scanning/fitting terrain."""
 import json
 from pathlib import Path
 import sys
-import time
 
 import numpy as np
 
@@ -11,10 +10,10 @@ from dense_map import geometry, transform
 
 class SourceFrameCorridor:
     """Test source-frame returns against gravity-aligned, physical body strips."""
-    def __init__(self, ground, events):
-        from surveyed_corridor import CorridorIndex
+    def __init__(self, ground, document):
+        from surveyed_corridor import index_from_document
         self.ground = rigid_matrix(ground)
-        self.index = CorridorIndex([self.ground @ np.asarray(event['body_pose']) for event in events])
+        self.index = index_from_document(document, self.ground)
 
     def contains(self, points):
         xyz = np.asarray(points[:, :3], dtype=np.float64)
@@ -78,31 +77,81 @@ def load_corridor_document(db, frame, poses=None):
     return make_document(frame, events)
 
 
+def continuous_paths(db, poses, events, ground, mount):
+    """Follow recorded optimized keyframes, never shortcut a curved trajectory.
+
+    Confirmed forward events bound this operation. Scan outages or implausible
+    tracking jumps break a path; a missing forward event alone does not. These
+    transport checks do not impose any map-size or total route-length limit.
+    """
+    if not events:
+        return []
+    first, last = events[0]['stamp_ns'], events[-1]['stamp_ns']
+    inverse_mount = np.linalg.inv(mount)
+    route = {stamp: dict(stamp_ns=int(stamp), anchor_stamp_ns=int(stamp),
+                         body_pose=(pose_matrix(pose) @ inverse_mount).tolist())
+             for stamp, pose in poses.items() if first <= stamp <= last}
+    route.update((event['stamp_ns'], event) for event in events)
+    stamps = np.array([row[0] for row in db.execute(
+        'SELECT stamp FROM scans WHERE stamp BETWEEN ? AND ? ORDER BY stamp',
+        (first, last))], dtype=np.int64)
+    # Counting large source-stamp gaps by prefix sum keeps per-edge checks O(log N).
+    outages = np.r_[0, np.cumsum(np.diff(stamps) > 2_000_000_000)]
+    paths, current = [], []
+    previous = None
+    for event in (route[stamp] for stamp in sorted(route)):
+        stamp = event['stamp_ns']
+        body = ground @ np.asarray(event['body_pose'], dtype=float)
+        broken = False
+        if previous is not None:
+            old_stamp, old_body = previous
+            lo = max(0, int(np.searchsorted(stamps, old_stamp, side='right'))-1)
+            hi = min(len(stamps)-1, int(np.searchsorted(stamps, stamp, side='left')))
+            dt = (stamp-old_stamp)*1e-9
+            delta = body[:3, 3]-old_body[:3, 3]
+            forward = old_body[:2, 0]+body[:2, 0]
+            heading_norm = float(np.linalg.norm(forward))
+            reversed_motion = (heading_norm > 1e-6 and
+                               float(delta[:2] @ (forward/heading_norm)) < -.05)
+            broken = (dt <= 0 or outages[hi] > outages[lo] or
+                      float(np.linalg.norm(delta)) > .5 + 3.*dt or reversed_motion)
+        if broken and current:
+            paths.append(current)
+            current = []
+        current.append(event)
+        previous = stamp, body
+    if current:
+        paths.append(current)
+    # After a tracking break, only connect portions bounded by actual forward
+    # confirmations. Unconfirmed leading/trailing keyframes do not grant free space.
+    confirmed = {event['stamp_ns'] for event in events}
+    bounded = []
+    for path in paths:
+        confirmations = [i for i, event in enumerate(path) if event['stamp_ns'] in confirmed]
+        if confirmations:
+            bounded.append(path[confirmations[0]:confirmations[-1]+1])
+    return bounded
+
+
 def prepare_corridor(db, poses, frame, directory, created):
     """Return (document, index), or (None, None) for unmarked historical runs.
 
-    Raw scans remain in the run database. A marked new map stores only one PCD;
-    its terrain model is fitted before the user's surveyed strip is erased.
+    Raw scans remain in the run database. Save only one filtered PCD and compact
+    source-frame path/calibration metadata; no point-cloud terrain fit or NPZ.
     """
     document = load_corridor_document(db, frame, poses)
     if document is None:
         return None, None
-    from surveyed_corridor import CorridorIndex, make_document
+    from surveyed_corridor import make_document
     events = document['poses']
-    if not events:
-        return document, CorridorIndex([])
     marker = json.loads(db.execute("SELECT value FROM meta WHERE name='surveyed_corridor'").fetchone()[0])
 
-    # These modules are pure NumPy/SQLite helpers; saving needs no ROS2 runtime,
-    # Open3D, SciPy or C++ compilation on the Noetic host.
+    # Calibration reads only small metadata files. It does not replay raw points.
     navigation = Path(__file__).resolve().parents[1] / 'navigation'
     sys.path.insert(0, str(navigation))
-    sys.path.insert(0, str(navigation / 'original_go2/go2_3d'))
-    from prepare_map import transforms, apply
-    from terrain import build_terrain
+    from prepare_map import transforms
 
     ground, mount, sensor = transforms(Path(directory), frame)
-    index = SourceFrameCorridor(ground, events)
     physical = marker.get('mount')
     if (not isinstance(physical, dict) or physical.get('parent') != 'base_link' or
             str(physical.get('child', '')).lstrip('/') != sensor):
@@ -115,24 +164,11 @@ def prepare_corridor(db, poses, frame, directory, created):
     body_height = float(bodies[0][2, 3])
     if not np.isfinite(body_height) or not .1 < body_height < 1.:
         raise ValueError('人工通行区地图的建图起点站立高度无效')
-    anchors = np.array([body[:3, 3] for body in bodies])
-    anchors[:, 2] -= body_height
-    print(f'正在保存 {len(events):,} 段人工确认通行区；先从原始扫描保留局部地形依据……', flush=True)
-    last_report = [time.monotonic()]
-    def progress(stage, count):
-        now = time.monotonic()
-        if stage == 'supported_cells' or now-last_report[0] >= 5.:
-            print(f'保存地形：{stage} {count:,}', flush=True)
-            last_report[0] = now
-    model = build_terrain((apply(world, ground) for _, _, world in world_scans(db, poses)),
-                          anchors, work_directory=directory, progress=progress)
-    target = Path(directory) / 'survey_terrain.npz'
-    if target.exists():
-        raise FileExistsError(target)
-    terrain = model.save(target)
-    created.append(target)
-    terrain.update(map_from_source_map=ground.tolist(), source_frame=frame.strip('/'),
-                   body_height_above_ground=body_height, body_from_lidar=mount.tolist(),
-                   evidence='raw_snapshot_before_surveyed_clearance')
-    document = make_document(frame, events, terrain=terrain)
+    calibration = dict(map_from_source_map=ground.tolist(), source_frame=frame.strip('/'),
+                       body_height_above_ground=body_height, body_from_lidar=mount.tolist())
+    paths = continuous_paths(db, poses, events, ground, mount)
+    document = make_document(frame, events, paths=paths, calibration=calibration)
+    index = SourceFrameCorridor(ground, document)
+    print(f'正在沿优化轨迹连接 {len(events):,} 段通行区（{len(paths):,} 条连续记录）；'
+          '直接清理点云，不执行地形拟合。', flush=True)
     return document, index

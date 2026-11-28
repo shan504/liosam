@@ -86,8 +86,8 @@ def save(rospy, name, home):
         if dense.get('surveyed_corridor'):
             manifest['limitations'].append(
                 '本轮采用人工确认前行通行带：前方 0–1m、左右各 0.5m，全部高度。'
-                '主 PCD 已按优化位姿清理历史回波；surveyed_corridor.json 记录范围，'
-                '清理前局部地形另存，原扫描 SQLite 保留在本轮运行归档。')
+                '主 PCD 已沿优化轨迹连续清理历史回波；surveyed_corridor.json 记录路径和标定。'
+                '保存不拟合点云地形，原扫描 SQLite 保留在本轮运行归档。')
         (stage / 'manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False)+'\n',
                                              encoding='utf-8')
         print('正在生成文件校验清单……')
@@ -99,10 +99,12 @@ def save(rospy, name, home):
     print('地图保存完成：' + str(final / (name + '.pcd')))
     print('地图坐标系 %s；%d 帧；%d 点。' % (dense['frame_id'], dense['scans'], dense['points']))
     if dense.get('surveyed_corridor'):
-        print('本轮记录 %d 段前行通行带，清除 %d 个历史回波。旧地图未修改。' %
-              (dense['corridor_events'], dense['cleared_points']))
+        print('本轮 %d 个前进记录，连接 %d 段轨迹，清除 %d 个历史回波；未执行地形拟合。旧地图未修改。' %
+              (dense['corridor_events'], dense['corridor_links'], dense['cleared_points']))
+        if dense['corridor_splits']:
+            print('检测到断流、位姿跳变或倒退，保留 %d 处分段；这些位置没有强制连接。' % dense['corridor_splits'])
         if not dense['corridor_events']:
-            print('本轮没有确认的前进记录，未清理点云或强制设置通行格；请检查 F_dense.log 的前进计数。')
+            print('本轮没有确认的前进记录，未清理点云；不能生成连续道路导航图，请检查 F_dense.log 的前进计数。')
     for warning in run['warnings']:
         print('标定/来源备注：' + warning)
     if not live['ground_tf_available']:

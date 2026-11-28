@@ -17,10 +17,10 @@ sys.path.insert(0, str(NOETIC.parent/'navigation'))
 sys.path.insert(0, str(NOETIC.parent/'navigation/original_go2/go2_3d'))
 from save_navigation_dense import export_dense
 import save_navigation_dense
-from corridor_export import pose_matrix
+from corridor_export import pose_matrix, continuous_paths
 from prepare_map import rigid, quaternion, apply, point_array
 from surveyed_corridor import POLICY, read_document
-from terrain import load_terrain
+from terrain import TerrainModel
 
 
 def values(matrix):
@@ -86,12 +86,18 @@ def independently_inside(points, body):
 
 
 class CorridorExport(unittest.TestCase):
-    def test_two_maps_filter_all_historical_heights_preserve_terrain_and_index(self):
+    def test_two_maps_filter_single_pass_without_terrain_and_preserve_index(self):
         for name,yaw,shift in [('east',0.,(0.,0.,0.)),('west',.73,(-23.,41.,.4))]:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
                 database,stage,db,poses,bodies,raw=fixture(tmp,name,yaw,shift)
                 before=db.execute('SELECT stamp,anchor,points FROM scans ORDER BY stamp').fetchall()
-                result=export_dense(database,stage/(name+'.pcd'))
+                with patch('terrain.build_terrain', side_effect=AssertionError('save must not fit terrain')), \
+                        patch.object(TerrainModel, 'save', side_effect=AssertionError('save must not write terrain')), \
+                        patch.object(save_navigation_dense, 'world_scans', wraps=save_navigation_dense.world_scans) as replay:
+                    result=export_dense(database,stage/(name+'.pcd'))
+                self.assertEqual(replay.call_count,1)
+                self.assertFalse((stage/'survey_terrain.npz').exists())
+                self.assertFalse(result['terrain_fitting'])
                 document=read_document(stage/'surveyed_corridor.json',expected_frame='odom')
                 self.assertEqual(len(document['poses']),1)
                 np.testing.assert_allclose(document['poses'][0]['body_pose'],bodies[1],atol=1e-7)
@@ -108,12 +114,10 @@ class CorridorExport(unittest.TestCase):
                 self.assertEqual([int(row['point_count']) for row in rows],[len(expected[0]),0,len(expected[2])])
                 self.assertEqual([int(row['first_point_index']) for row in rows],[0,len(expected[0]),len(expected[0])])
                 self.assertEqual(db.execute('SELECT stamp,anchor,points FROM scans ORDER BY stamp').fetchall(),before)
-                descriptor=document['terrain']
-                model=load_terrain(stage,{'terrain_model':descriptor})
-                # The saved terrain still knows the ground removed from PCD.
-                h,support=model.evaluate(np.array([[2.225,.125,0.],[2.725,-.125,0.]]))
-                self.assertTrue(support.all())
-                np.testing.assert_allclose(h,0.,atol=2e-5)
+                self.assertEqual(document['version'],2)
+                self.assertNotIn('terrain',document)
+                descriptor=document['calibration']
+                self.assertAlmostEqual(descriptor['body_height_above_ground'],.37)
                 np.testing.assert_allclose(descriptor['map_from_source_map'],np.linalg.inv(
                     rigid(shift,[0,0,math.sin(yaw/2),math.cos(yaw/2)])),atol=1e-7)
                 self.assertEqual(len(list(stage.glob('*.pcd'))),1)
@@ -161,7 +165,7 @@ class CorridorExport(unittest.TestCase):
             database,stage,db,poses,bodies,raw=fixture(tmp,yaw=.7,shift=(5.,-3.,1.),pitch=math.pi/6)
             result=export_dense(database,stage/'lane.pcd')
             document=read_document(stage/'surveyed_corridor.json')
-            ground=np.asarray(document['terrain']['map_from_source_map'])
+            ground=np.asarray(document['calibration']['map_from_source_map'])
             ground_body=ground@bodies[1]
             expected=[]
             wrong_source_removed=0
@@ -222,6 +226,72 @@ class CorridorExport(unittest.TestCase):
             self.assertEqual(result['corridor_events'],1)
             np.testing.assert_allclose(read_document(stage/'surveyed_corridor.json')['poses'][0]['body_pose'],bodies[1],atol=1e-6)
             db.close()
+
+    def test_save_connects_sparse_confirmations_along_curved_measured_keyframes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database,stage,db,_,_,_=fixture(tmp)
+            mount=rigid([.215,0,.25],[0,math.sin(math.pi/12),0,math.cos(math.pi/12)])
+            trace=[(0.,0.,0.),(.5,0.,0.),(1.,0.,0.),(1.5,0.,0.),(2.,0.,math.pi/2),
+                   (2.,.5,math.pi/2),(2.,1.,math.pi/2),(2.,1.5,math.pi/2),
+                   (2.,2.,math.pi),(1.5,2.,math.pi),(1.,2.,math.pi),(.5,2.,math.pi),(0.,2.,math.pi)]
+            db.execute('DELETE FROM scans');db.execute('DELETE FROM poses');db.execute('DELETE FROM corridor_events')
+            cloud=np.array([[1.,0.,7.,10.],[2.,1.,-2.,11.],[1.,2.,.3,12.],
+                            [1.,1.,.3,20.],[4.,4.,1.,21.]],dtype='<f4')
+            for i,(x,y,yaw) in enumerate(trace):
+                stamp=(i+1)*1_000_000_000
+                body=rigid([x,y,.37],[0,0,math.sin(yaw/2),math.cos(yaw/2)])
+                lidar=body@mount
+                db.execute('INSERT INTO poses VALUES(?,?)',(stamp,json.dumps(values(lidar))))
+                local=cloud.copy();local[:,:3]=apply(cloud,np.linalg.inv(lidar))
+                db.execute('INSERT INTO scans VALUES(?,?,?)',(stamp,stamp,local.astype('<f4').tobytes()))
+                if i in (0,len(trace)-1):
+                    db.execute('INSERT INTO corridor_events VALUES(?,?,?)',
+                        (stamp,stamp,json.dumps(np.linalg.inv(mount).tolist())))
+            db.commit()
+            result=export_dense(database,stage/'lane.pcd')
+            doc=read_document(stage/'surveyed_corridor.json')
+            self.assertEqual(result['corridor_events'],2)
+            self.assertEqual(result['corridor_paths'],1)
+            self.assertEqual(result['corridor_links'],len(trace)-1)
+            self.assertEqual([event['stamp_ns'] for event in doc['paths'][0]],
+                             [(i+1)*1_000_000_000 for i in range(len(trace))])
+            actual=point_array(stage/'lane.pcd')
+            # Three levels of ghost returns on each measured road leg vanish;
+            # the U-shaped interior is not cleared by a start/end shortcut.
+            self.assertEqual(set(actual[:,3]),{20.,21.})
+            self.assertEqual(result['cleared_points'],3*len(trace))
+            self.assertFalse((stage/'survey_terrain.npz').exists())
+            db.close()
+
+    def test_missing_scans_tracking_jumps_and_reverse_split_only_confirmed_paths(self):
+        for problem in ('outage','jump','reverse'):
+            with self.subTest(problem=problem), tempfile.TemporaryDirectory() as tmp:
+                database,stage,db,_,_,_=fixture(tmp)
+                db.execute('DELETE FROM scans')
+                stamps=[1_000_000_000,2_000_000_000,3_000_000_000,4_000_000_000]
+                coordinates=[0.,.5,1.,1.5]
+                if problem=='outage':
+                    stamps=[1_000_000_000,2_000_000_000,8_000_000_000,9_000_000_000]
+                elif problem=='jump':
+                    coordinates=[0.,.5,20.,20.5]
+                else:
+                    coordinates=[0.,.5,0.,.5]
+                poses={}
+                events=[]
+                for stamp,x in zip(stamps,coordinates):
+                    body=rigid([x,0.,.37],[0,0,0,1])
+                    poses[stamp]=values(body)
+                    events.append(dict(stamp_ns=stamp,anchor_stamp_ns=stamp,body_pose=body.tolist()))
+                    db.execute('INSERT INTO scans VALUES(?,?,?)',(stamp,stamp,b'0'*16))
+                paths=continuous_paths(db,poses,events,np.eye(4),np.eye(4))
+                self.assertEqual([[e['stamp_ns'] for e in path] for path in paths],
+                                 [stamps[:2],stamps[2:]])
+                # Internal, unconfirmed frames after a break cannot start a
+                # clearing path by themselves.
+                sparse=continuous_paths(db,poses,[events[0],events[-1]],np.eye(4),np.eye(4))
+                self.assertEqual([[e['stamp_ns'] for e in path] for path in sparse],
+                                 [[stamps[0]],[stamps[-1]]])
+                db.close()
 
 
 if __name__=='__main__':
