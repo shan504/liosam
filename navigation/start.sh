@@ -47,7 +47,7 @@ prepared=$("${docker_cmd[@]}" run --rm --init --network none --user "$(id -u):$(
         done
         /usr/bin/python3 check_nav2_plugins.py >&2
         /usr/bin/python3 prepare.py --mode mapping >&2
-        /usr/bin/python3 -c "import mapper, operator_bridge, obstacle_cloud, control_bridge, navigation_diagnostics" >&2
+        /usr/bin/python3 -c "import mapper, operator_bridge, obstacle_cloud, display_cloud, control_bridge, navigation_diagnostics" >&2
         exec /usr/bin/python3 -u /repo/navigation/prepare_go2_map.py /map_source /cache')
 [[ $prepared =~ ^/cache/(original-go2-[a-f0-9]{24})$ ]] || { echo "导航地图准备失败: $prepared" >&2; exit 1; }
 map_cache="$cache/${BASH_REMATCH[1]}"
@@ -125,3 +125,4 @@ wait -n
 code=$?
 set -e
 exit "$code"
+

@@ -21,6 +21,56 @@ bash ~/go2-detail/navigation/start.sh inroom1
 sudo docker exec go2-lio-nav bash -lc 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && python3 /repo/navigation/waypoints.py -- "$@"' bash X1,Y1,YAW1 X2,Y2,YAW2
 ```
 
+## 道路显示和目标坐标（所有地图共用）
+
+统一 `Go2.json` 默认关闭完整 `/map_cloud`、`/registered_cloud` 的显示，
+改用 `/navigation/display/map_obstacles` 和 `/navigation/display/scan_obstacles`。
+显示节点读取当前所选地图 `metadata.yaml` 的地面标定，过滤离地不足 0.10 m
+的点，保留其余全部高度；不改保存的 PCD、GICP 输入、障碍层或运动参数。
+右侧用浅色显示已观测通行格、深灰显示未知区域，叠加全局/局部代价地图，
+全局路径为绿色、局部路径为橙色。该画面表达栅格通行信息，不识别相机中的
+道路、草地或农田语义。两个视图仍可三维旋转。
+
+**拉取代码不会替换 Foxglove 已导入的布局。** 更新后重新导入仓库根目录
+`Go2.json`，或在现有两个 3D 面板里将固定和显示参考系都设为 `map`；关闭
+`/map_cloud`、`/registered_cloud`，打开上述两路显示点云、`/map`、
+`/global_costmap/costmap`、`/local_costmap/costmap`、`/plan` 和 `/local_plan`。
+Windows 可从机器狗复制布局（把地址替换为机器狗当前 Wi-Fi 地址）：
+
+```powershell
+scp unitree@172.20.10.2:/home/unitree/go2-detail/Go2.json "$env:USERPROFILE\Downloads\Go2.json"
+```
+
+旧布局若仍发布 `odom` 目标，公共操作节点会在定位有效时按真实的
+`map <- odom` TF 转换位置和朝向。非零时间戳使用对应时刻的变换，暂缺时
+短暂异步等待；零时间戳使用新鲜的最新变换。变换缺失、过期或定位无效时
+明确拒绝，不把坐标直接改名成 `map`。多个点击按输入顺序处理；手动停止、
+取消或重新初始化会撤销待处理点击。地图检查、队列和运动授权检查继续有效。
+
+## 保存和复用航点
+
+在导航运行期间按顺序点选目标，确认航点已经进入队列后，另开终端保存。
+保存完整点位顺序和朝向，包括本次已完成的点；不会改变正在执行的任务。
+
+```bash
+bash ~/go2-detail/navigation/routes.sh save farm_route1
+bash ~/go2-detail/navigation/routes.sh list
+```
+
+下次先启动同一版本地图的导航，再加载路线。加载只排队，等待定位有效后
+点击“启用运动”执行：
+
+```bash
+bash ~/go2-detail/navigation/start.sh farm
+# 另一个终端：
+bash ~/go2-detail/navigation/routes.sh load farm_route1
+```
+
+文件保存在机器狗 `~/.local/share/go2-navigation/routes/`，重启容器或机器狗
+不会丢失。路线校验所用地图内容和坐标指纹，不能将一张地图的坐标直接用于
+另一张地图或重新建图后的版本；通用保存/加载功能适用于所有地图。
+已有路线不为空时需先完成或明确取消，加载不会静默覆盖活动队列。
+
 ## 移植范围
 
 ### 大范围地图栅格（所有地图共用）
@@ -67,5 +117,5 @@ sudo docker exec go2-lio-nav bash -lc 'source /opt/ros/humble/setup.bash && sour
 
 `prepare_go2_map.py` 使用每个存档自己的地面标定、安装外参、轨迹和扫描索引。导航先验以原 dense 模式的 2 cm 体素跨全部高度聚合，二维地图使用归档回波、可确定射线起点的关键帧及原 Go2 的地面、占用、去噪规则。每张地图保留自己的建图起点和原始 PCD。
 
-导入的源码中，`stack.launch.py` 选择传感器适配后的运动桥并传递本项目的 Foxglove 设置，`control_bridge.py` 和 `patches/dds/go2_edu_dds_bridge.py` 提供注入该传感器输入的入口。规划器与控制器的参数在导入的 `go2_3d/prepare.py` 与 `go2_3d/motion_profile.py`。导航端使用原仓库的导航图层，左、右视图可显示完整先验点云和配准点云。
+导入的源码中，`stack.launch.py` 选择传感器适配后的运动桥并传递本项目的 Foxglove 设置，`control_bridge.py` 和 `patches/dds/go2_edu_dds_bridge.py` 提供注入该传感器输入的入口。规划器与控制器的参数在导入的 `go2_3d/prepare.py` 与 `go2_3d/motion_profile.py`。完整先验点云和配准点云话题保留，可手动开启检查；导航默认显示去地面后的障碍点云。
 

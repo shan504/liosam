@@ -49,9 +49,21 @@ class SharedFoxgloveLayout(unittest.TestCase):
                 self.assertTrue(view["cameraState"]["perspective"])
                 self.assertGreater(view["cameraState"]["phi"], 0)
                 self.assertLess(view["cameraState"]["phi"], 90)
-                for topic in (cloud_topic, "/map_cloud", "/registered_cloud",
+                for topic in (cloud_topic, "/map", "/navigation/display/map_obstacles",
+                              "/navigation/display/scan_obstacles",
                               "/go2_visual/live/model_mesh"):
                     self.assertTrue(view["topics"][topic]["visible"], topic)
+                for topic in ("/map_cloud", "/registered_cloud"):
+                    self.assertFalse(view["topics"][topic]["visible"], topic)
+
+    def test_goal_view_exposes_roads_costmaps_and_both_paths(self):
+        view, = [view for view in self.panels["3D"] if view["publish"]["type"] == "pose"]
+        topics = view["topics"]
+        self.assertEqual(topics["/map"]["alpha"], 1.)
+        self.assertNotEqual(topics["/map"]["minColor"], topics["/map"]["unknownColor"])
+        for topic in ("/global_costmap/costmap", "/local_costmap/costmap", "/plan", "/local_plan"):
+            self.assertTrue(topics[topic]["visible"], topic)
+        self.assertNotEqual(topics["/plan"]["gradient"], topics["/local_plan"]["gradient"])
 
     def test_camera_and_status_panels(self):
         image, = self.panels["Image"]

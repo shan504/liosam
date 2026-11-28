@@ -42,10 +42,15 @@
         "/map": {
           "visible": true,
           "colorMode": "map",
-          "alpha": 0.65
+          "alpha": 1.0,
+          "minColor": "#e8e7e3ff",
+          "maxColor": "#14181dff",
+          "unknownColor": "#46515aff",
+          "invalidColor": "#ff00ffff",
+          "frameLocked": false
         },
         "/map_cloud": {
-          "visible": true,
+          "visible": false,
           "pointSize": 1,
           "colorMode": "colormap",
           "colorField": "z",
@@ -53,7 +58,7 @@
           "decayTime": 0
         },
         "/registered_cloud": {
-          "visible": true,
+          "visible": false,
           "pointSize": 2,
           "colorMode": "flat",
           "flatColor": "#36e5ffff",
@@ -67,13 +72,25 @@
         "/local_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
-          "alpha": 0.3
+          "alpha": 0.35
         },
         "/plan": {
-          "visible": true
+          "visible": true,
+          "type": "line",
+          "lineWidth": 0.08,
+          "gradient": [
+            "#39ff78ff",
+            "#39ff78ff"
+          ]
         },
         "/local_plan": {
-          "visible": true
+          "visible": true,
+          "type": "line",
+          "lineWidth": 0.05,
+          "gradient": [
+            "#ff8c20ff",
+            "#ff8c20ff"
+          ]
         },
         "/global_costmap/published_footprint": {
           "visible": true
@@ -158,6 +175,22 @@
           "decayTime": 0,
           "minValue": 0.0,
           "maxValue": 3.5
+        },
+        "/navigation/display/map_obstacles": {
+          "visible": true,
+          "pointSize": 1,
+          "colorMode": "colormap",
+          "colorMap": "turbo",
+          "colorField": "z",
+          "decayTime": 0,
+          "explicitAlpha": 0.65
+        },
+        "/navigation/display/scan_obstacles": {
+          "visible": true,
+          "pointSize": 1.5,
+          "colorMode": "flat",
+          "flatColor": "#ffb84dcc",
+          "decayTime": 0
         }
       },
       "layers": {},
@@ -216,10 +249,15 @@
         "/map": {
           "visible": true,
           "colorMode": "map",
-          "alpha": 0.65
+          "alpha": 1.0,
+          "minColor": "#e8e7e3ff",
+          "maxColor": "#14181dff",
+          "unknownColor": "#46515aff",
+          "invalidColor": "#ff00ffff",
+          "frameLocked": false
         },
         "/map_cloud": {
-          "visible": true,
+          "visible": false,
           "pointSize": 1,
           "colorMode": "colormap",
           "colorField": "z",
@@ -227,7 +265,7 @@
           "decayTime": 0
         },
         "/registered_cloud": {
-          "visible": true,
+          "visible": false,
           "pointSize": 2,
           "colorMode": "flat",
           "flatColor": "#36e5ffff",
@@ -239,15 +277,27 @@
           "alpha": 0.3
         },
         "/local_costmap/costmap": {
-          "visible": false,
+          "visible": true,
           "colorMode": "costmap",
-          "alpha": 0.3
+          "alpha": 0.35
         },
         "/plan": {
-          "visible": true
+          "visible": true,
+          "type": "line",
+          "lineWidth": 0.08,
+          "gradient": [
+            "#39ff78ff",
+            "#39ff78ff"
+          ]
         },
         "/local_plan": {
-          "visible": true
+          "visible": true,
+          "type": "line",
+          "lineWidth": 0.05,
+          "gradient": [
+            "#ff8c20ff",
+            "#ff8c20ff"
+          ]
         },
         "/global_costmap/published_footprint": {
           "visible": true
@@ -320,6 +370,23 @@
               "visible": true
             }
           }
+        },
+        "/navigation/display/map_obstacles": {
+          "visible": true,
+          "pointSize": 1,
+          "colorMode": "flat",
+          "colorMap": "turbo",
+          "colorField": "z",
+          "decayTime": 0,
+          "explicitAlpha": 0.4,
+          "flatColor": "#9daab866"
+        },
+        "/navigation/display/scan_obstacles": {
+          "visible": true,
+          "pointSize": 1.5,
+          "colorMode": "flat",
+          "flatColor": "#ffb84dcc",
+          "decayTime": 0
         }
       },
       "layers": {},

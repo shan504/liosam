@@ -91,6 +91,10 @@ def generate_launch_description():
         Node(package='robot_state_publisher',executable='robot_state_publisher',output='screen',
              parameters=[{'robot_description':(config/'go2_edu.urdf').read_text(),'use_sim_time':False}]),
         OpaqueFunction(function=mapper_node),
+        Node(executable='/usr/bin/python3',name='go2_navigation_display',output='screen',
+             condition=IfCondition(PythonExpression(["'",mode,"' != 'mapping'"])),
+             arguments=[str(root/'go2_3d/display_cloud.py')],
+             parameters=[{'map_directory':'/runtime/navigation_map'}]),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(root/'go2_3d/rtabmap_backend.launch.py')),
             condition=IfCondition(PythonExpression([
@@ -136,3 +140,4 @@ def generate_launch_description():
                               'capabilities': '[clientPublish,connectionGraph,assets]',
                               'client_topic_whitelist': '["^/(initialpose|goal_pose|control/enable|navigation/(cancel|resume|waypoint|route/command))$"]'}.items()),
     ])
+

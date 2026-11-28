@@ -8,8 +8,6 @@ import re
 import stat
 import tempfile
 
-import yaml
-
 
 MAX_WAYPOINTS = 100
 MAX_FILE_BYTES = 128 * 1024
@@ -125,6 +123,10 @@ def map_identity(directory):
     same map geometry. Paths and creation timestamps are deliberately excluded
     so an unchanged archived/copied bundle can still reuse its route.
     """
+    # Saving/listing route files on the host only needs the standard library.
+    # YAML is needed for map identity in the ROS container, not the host CLI.
+    import yaml
+
     directory = Path(directory).resolve(strict=True)
     nav = yaml.safe_load(_map_file(directory, 'nav.yaml').read_text())
     metadata = yaml.safe_load(_map_file(directory, 'metadata.yaml').read_text())
@@ -233,3 +235,4 @@ class RouteStore:
             route = self.load(path.stem)
             result.append(dict(name=path.stem, waypoints=len(route['waypoints']), map=route['map']['label']))
         return result
+

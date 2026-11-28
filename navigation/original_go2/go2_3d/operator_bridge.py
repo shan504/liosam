@@ -24,6 +24,8 @@ from tf2_ros import Buffer, TransformListener, TransformException
 from geometry import pose_matrix, grid_cell, quaternion_from_matrix, planar_pose
 from motion_profile import ARRIVAL_RADIUS
 from route_store import map_identity, validate_route
+from goal_frames import (GOAL_TF_WAIT_SECONDS, goal_frame,
+                         odom_goal_to_map, validate_odom_goal_time)
 
 
 class DispatchNotReady(ValueError):
@@ -72,6 +74,9 @@ class Operator(Node):
         self.cancelling = False
         self.last_goal_status = None
         self.waypoints = deque()
+        # Preserve click order while a stamped odom click waits briefly for
+        # TF callbacks. These inputs are not executable waypoints yet.
+        self.goal_inputs = deque()
         # Reusable plan history is separate from the execution queue. It can
         # be saved after completion/cancel, but never authorizes resuming it.
         self.planned_route = []
@@ -307,6 +312,7 @@ class Operator(Node):
         if self.mode != 'navigation':
             return
         self.clear_auto_resume('manual initial pose')
+        self.discard_goal_inputs('手动设置初始位姿')
         # Remove the prior user's executing-route authority BEFORE invoking
         # the shared pause path, so it cannot create automatic resume intent.
         self.route_started = False
@@ -326,6 +332,7 @@ class Operator(Node):
                 f'latest_mapper_{self.localization_state}')
 
     def watchdog(self):
+        self.process_goal_inputs()
         if not self.localized() and (self.goal_handle is not None or self.goal_pending or self.waiting_goal is not None):
             if not self.route_paused:
                 self.pause_for_localization()
@@ -573,6 +580,9 @@ class Operator(Node):
         intent = self.auto_resume if automatic else None
         if automatic and intent is None:
             return
+        if message.data and self.goal_inputs:
+            self.report('Enable deferred: 目标正在等待坐标转换，请等航点编号出现后再启用运动')
+            return
         if not automatic:
             self.clear_auto_resume('manual enable' if message.data else 'manual disable')
             if message.data:
@@ -657,6 +667,7 @@ class Operator(Node):
         future.add_done_callback(done)
 
     def on_cancel(self,message):
+        self.discard_goal_inputs('取消导航/停止运动')
         self.clear_auto_resume('manual cancel')
         self.reset_dispatch_wait()
         self.goal_generation += 1
@@ -748,6 +759,8 @@ class Operator(Node):
             if self.route_map is None:
                 raise ValueError('Running map identity unavailable; restart navigation with a prepared map: '+self.route_map_error)
             if command == 'snapshot':
+                if self.goal_inputs:
+                    raise ValueError('目标坐标转换尚未完成，请稍后保存路线')
                 if self.planned_route_overflow:
                     raise ValueError('Complete route exceeds the 100-point file limit; no partial route was saved')
                 route = validate_route(dict(schema_version=1,map=self.route_map,
@@ -755,7 +768,7 @@ class Operator(Node):
                 result = dict(request_id=request_id,success=True,
                     message=f'Full route snapshot: {len(route["waypoints"])} points; motion unchanged',route=route)
             else:
-                if (self.waypoints or self.inflight_waypoint is not None or
+                if (self.goal_inputs or self.waypoints or self.inflight_waypoint is not None or
                         self.goal_handle is not None or self.goal_pending or self.cancelling or
                         self.route_paused or self.route_started or
                         self.enable_query is not None or self.pause_disable_future is not None or
@@ -815,9 +828,74 @@ class Operator(Node):
         if self.action is None:
             self.report('Goal rejected: navigation mode required')
             return
-        if message.header.frame_id != 'map':
-            self.report(f'Goal rejected: frame_id={message.header.frame_id!r}; set the Foxglove 3D display frame to map')
+        try:
+            frame = goal_frame(message.header.frame_id)
+            p,q = message.pose.position,message.pose.orientation
+            pose_matrix([p.x,p.y,p.z],[q.x,q.y,q.z,q.w])
+            if frame == 'odom':
+                if not self.localized():
+                    raise ValueError('odom 目标需要新鲜有效定位；请等待定位恢复，或将显示参考系设为 map')
+                validate_odom_goal_time(message,self.get_clock().now().nanoseconds)
+        except (ValueError,TypeError) as error:
+            self.report(f'Goal rejected: {error}')
             return
+        if len(self.goal_inputs)+len(self.waypoints)+int(self.inflight_waypoint is not None) >= 100:
+            self.report('Goal rejected: waypoint queue limit is 100 (including pending frame conversions)')
+            return
+        if self.cancelling or (self.goal_pending and self.cancel_requested):
+            self.report('Goal rejected: wait for current cancellation to finish')
+            return
+        # New user intent revokes prior automatic recovery before any TF wait.
+        self.clear_auto_resume('new waypoint')
+        message = copy.deepcopy(message)
+        message.header.frame_id = frame
+        self.goal_inputs.append(dict(message=message,received=time.monotonic(),reported=False))
+        self.process_goal_inputs()
+
+    def discard_goal_inputs(self, reason):
+        count = len(self.goal_inputs)
+        self.goal_inputs.clear()
+        if count:
+            self.report(f'已取消 {count} 个等待坐标转换的目标：{reason}')
+
+    def process_goal_inputs(self):
+        """Nonblocking exact-time TF retry; never substitutes latest for a stamp."""
+        while self.goal_inputs:
+            pending = self.goal_inputs[0]
+            message = pending['message']
+            if message.header.frame_id == 'odom':
+                if time.monotonic()-pending['received'] >= GOAL_TF_WAIT_SECONDS:
+                    self.goal_inputs.popleft()
+                    self.report('Goal rejected: 等待 map <- odom TF 超时，未加入队列；请重新设置目标')
+                    continue
+                if not self.localized():
+                    self.goal_inputs.popleft()
+                    self.report('Goal rejected: 定位无效或过期，未转换 odom 目标，请恢复后重新设置')
+                    continue
+                try:
+                    validate_odom_goal_time(message,self.get_clock().now().nanoseconds)
+                    query = Time.from_msg(message.header.stamp)
+                    transform = self.buffer.lookup_transform('map','odom',query)
+                    message = odom_goal_to_map(message,transform,self.get_clock().now().nanoseconds)
+                except TransformException as error:
+                    if time.monotonic()-pending['received'] < GOAL_TF_WAIT_SECONDS:
+                        if not pending['reported']:
+                            pending['reported'] = True
+                            self.report('目标等待对应时刻的 map <- odom TF；转换后按点击顺序加入队列')
+                        return
+                    self.goal_inputs.popleft()
+                    self.report(f'Goal rejected: 等待 map <- odom TF 超时，未加入队列；{error}')
+                    continue
+                except (ValueError,TypeError) as error:
+                    self.goal_inputs.popleft()
+                    self.report(f'Goal rejected: {error}')
+                    continue
+                self.report('目标已按真实 TF 从 odom 转换到 map')
+            self.goal_inputs.popleft()
+            self.queue_map_goal(message)
+
+    def queue_map_goal(self,message):
+        """Existing map/grid/enable checks, after optional input conversion."""
         try:
             p,q = message.pose.position,message.pose.orientation
             pose_matrix([p.x,p.y,p.z],[q.x,q.y,q.z,q.w])
@@ -1129,3 +1207,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
